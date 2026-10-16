@@ -50,7 +50,7 @@
       const dB = this.baseDanger(x, y);
       const ring1 = Math.abs(i) <= 1 && Math.abs(j) <= 1;
       const w = {
-        none: 0.22,
+        none: 0.08,
         village: U.clamp(0.42 - 0.07 * dB, 0.08, 0.42),
         town: U.clamp(0.18 + 0.05 * dB, 0, 0.36),
         city: ring1 ? 0 : (dB < 1.6 ? 0.03 : U.clamp(0.06 + 0.05 * dB, 0, 0.3)),
@@ -73,7 +73,7 @@
       if (i === 0 && j === 0) {
         // aldea cercana al campamento inicial
         const a = this.h(0, 0, 3) * Math.PI * 2;
-        x = Math.cos(a) * 5600; y = Math.sin(a) * 5600;
+        x = Math.cos(a) * 4200; y = Math.sin(a) * 4200; // ~130 m: se llega en menos de un minuto
         type = 'village';
       } else if (this.isMetro(i, j)) {
         type = 'metro';
@@ -109,6 +109,7 @@
     desiredR(i, j) {
       const s = this.siteBase(i, j);
       const r = (a, b) => (a + (b - a) * this.h(i, j, 6)) * M;
+      if (i === 0 && j === 0) return r(60, 90);
       switch (s.type) {
         case 'village': return r(70, 150);
         case 'town': return r(120, 200);
@@ -261,7 +262,7 @@
       if (rmin >= 2 || (rmax >= 3 && rng.chance(0.5))) kind = 'highway';
       else if (rmin === 0 && rmax <= 1 && rng.chance(0.5)) kind = 'dirt';
       const w = kind === 'highway' ? 288 : kind === 'road' ? 224 : 128;
-      const e = { i, j, dir, A, B, kind, w, key: 'e' + i + '_' + j + '_' + dir, collapsed: rng.chance(0.14), seed: rng.int(1, 1e9) };
+      const e = { i, j, dir, A, B, kind, w, key: 'e' + i + '_' + j + '_' + dir, collapsed: rng.chance(0.14) && false /* sin puentes caídos: dejaban zonas inaccesibles */, seed: rng.int(1, 1e9) };
       // tramos: urbano (con aceras) cerca de pueblos y ciudades, rural en medio
       const urbA = A.rank >= 2 ? A.R * 0.92 : 0, urbB = B.rank >= 2 ? B.R * 0.92 : 0;
       const parts = [];
@@ -333,7 +334,7 @@
       const fi = v.x > 0 ? -1 : 0, fj = v.y > 0 ? -1 : 0;
       const forced = i === fi && j === fj;
       const w = this.terrain.weights(x, y, {});
-      const p = forced ? 1 : 0.3 * w.farmland + 0.14 * w.plains + 0.06 * w.forest + 0.05 * w.desert + 0.04 * w.swamp;
+      const p = forced ? 1 : 0.12 + 0.45 * w.farmland + 0.25 * w.plains + 0.18 * w.forest + 0.08 * w.desert + 0.1 * w.swamp;
       let ok = this.h(i, j, 43) < p && Math.hypot(x, y) > TM.Config.SAFE_RADIUS + 1100 && !this.terrain.blocked(x, y);
       if (ok && !forced) {
         const list = this.sitesAround(x, y, 2, []);

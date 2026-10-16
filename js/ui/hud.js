@@ -77,6 +77,7 @@
       this.drawClock(ctx, g, W, s);
       this.drawNotes(ctx, W, H, dt, s);
       this.drawCampArrow(ctx, g, W, H);
+      this.drawPlaceArrow(ctx, g, W, H);
       if (p.alive) this.drawPrompt(ctx, g, W, H, s);
       if (p.alive && In.enabled) this.drawControls(ctx, In, p, g);
 
@@ -323,6 +324,51 @@
         ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + 9, ay); ctx.lineTo(ax + 6, ay - 3);
         ctx.moveTo(ax + 9, ay + 5); ctx.lineTo(ax, ay + 5); ctx.lineTo(ax + 3, ay + 8); ctx.stroke();
       }
+    }
+
+    // Flecha al lugar más cercano sin explorar (aldea, granja, hallazgo...): el mundo es grande y la vista corta
+    drawPlaceArrow(ctx, g, W, H) {
+      const p = g.player, M = g.world && g.world.macro;
+      if (!M || !p.alive) return;
+      const seen = this._seenPlaces || (this._seenPlaces = new Set());
+      this._placeT = (this._placeT || 0) - 1;
+      if (this._placeT <= 0) {
+        this._placeT = 30;
+        const SUB = { military: 'Base militar', prison: 'Cárcel', airfield: 'Aeródromo', industrial: 'Zona industrial' };
+        const NAME = { village: 'Aldea', town: 'Pueblo', city: 'Ciudad', metro: 'Gran ciudad', farm: 'Granja', ranch: 'Rancho', cabin: 'Cabaña', shack: 'Choza' };
+        const cand = [];
+        for (const s of M.sitesAround(p.x, p.y, 2, [])) if (s.type !== 'none') cand.push({ key: s.key, x: s.x, y: s.y, R: s.R || 3000, name: s.type === 'special' ? (SUB[s.sub] || 'Recinto') : NAME[s.type] });
+        const F = M.FARM, RR = M.RARE;
+        for (let dj = -4; dj <= 4; dj++) for (let di = -4; di <= 4; di++) {
+          const f = M.farm(Math.floor(p.x / F) + di, Math.floor(p.y / F) + dj);
+          if (f) cand.push({ key: f.key, x: f.x, y: f.y, R: f.R, name: NAME[f.type] || 'Granja' });
+        }
+        for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+          const r = M.rare(Math.floor(p.x / RR) + di, Math.floor(p.y / RR) + dj);
+          if (r) cand.push({ key: r.key, x: r.x, y: r.y, R: r.R, name: 'Algo interesante' });
+        }
+        let best = null, bd = 650 * 32;
+        for (const c of cand) {
+          const d = Math.hypot(c.x - p.x, c.y - p.y) - c.R * 0.6;
+          if (d < 0) { seen.add(c.key); continue; }
+          if (!seen.has(c.key) && d < bd) { bd = d; best = c; }
+        }
+        this._place = best ? { x: best.x, y: best.y, name: best.name } : null;
+      }
+      const t = this._place;
+      if (!t) return;
+      const d = Math.hypot(t.x - p.x, t.y - p.y);
+      const a = Math.atan2(t.y - p.y, t.x - p.x);
+      const s = (TM.Input && TM.Input.s) || 48;
+      const R = Math.min(W, H) * 0.36;
+      const x = W / 2 + Math.cos(a) * R;
+      const y = Math.min(H - s * 1.35 - 24, Math.max(H * 0.3, H / 2 + Math.sin(a) * R));
+      ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+      ctx.fillStyle = 'rgba(200,210,190,0.6)';
+      ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-5, -6); ctx.lineTo(-2, 0); ctx.lineTo(-5, 6); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      ctx.font = `10px ${FONT}`; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(210,215,200,0.7)';
+      ctx.fillText(`${t.name} ${Math.round(d / TM.Config.UNITS_PER_M)} m`, x, y + 17);
     }
 
     drawCampArrow(ctx, g, W, H) {

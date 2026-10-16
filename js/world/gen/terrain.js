@@ -1,6 +1,7 @@
 // Paisaje: biomas grandes con transiciones suaves, ríos, lagos, pantanos, barrancos y zonas quemadas. TM.WG.Terrain
 (function () {
   const U = TM.U;
+  const FORD_T = 0.72;
   const WG = TM.WG = TM.WG || {};
   const ss = U.smoothstep;
 
@@ -104,14 +105,17 @@
 
     // Tipo de terreno: 0 suelo, 1 agua (orilla), 2 agua profunda, 3 barranco
     kindAt(x, y) {
-      const r = this._riverField(x, y);
+      // vados: manchas de tierra firme que cruzan ríos y barrancos cada ~200 m de media (nunca quedan zonas aisladas)
+      const ford = this.isFord(x, y);
+      const r = ford ? Infinity : this._riverField(x, y);
       const l = this._lakeField(x, y);
       const p = this._poolField(x, y);
       const d = Math.min(r, l, p);
       if (d < 0) return d < -40 ? 2 : 1;
-      if (this._ravineField(x, y) < 0) return 3;
+      if (!ford && this._ravineField(x, y) < 0) return 3;
       return 0;
     }
+    isFord(x, y) { return U.noise2(x / 1100 + 17.3, y / 1100 - 5.1, this.s(19)) > FORD_T; }
 
     // ¿Puede haber agua o barranco en este rectángulo? (descarte barato)
     mayHaveWater(x0, y0, x1, y1) {

@@ -7,7 +7,7 @@
     DAY_LENGTH: 480,       // segundos reales por día de juego
     START_HOUR: 7,
     SAFE_RADIUS: 450,      // radio del campamento inicial (~14 m)
-    VIEW_HEIGHT: 420,      // unidades de mundo visibles en vertical (~13 m)
+    VIEW_HEIGHT: 540,      // unidades de mundo visibles en vertical (~17 m)
     DANGER_DIST: 12000,    // distancia (u) a la que el peligro base vale 1 (~375 m)
     DEBUG: /[?&]debug/.test(location.search),
     quality: 'med',
@@ -16,10 +16,10 @@
 
   // Generación del mundo (ajustables)
   C.WORLD = {
-    SITE: 16384,           // rejilla de asentamientos principales (512 m)
-    FARM: 4096,            // rejilla de granjas (128 m)
+    SITE: 12288,           // rejilla de asentamientos principales (384 m)
+    FARM: 2560,            // rejilla de granjas y casas sueltas (80 m)
     RARE: 8192,            // rejilla de hallazgos raros (256 m)
-    RARE_P: 0.07,          // probabilidad de hallazgo raro por celda
+    RARE_P: 0.14,          // probabilidad de hallazgo raro por celda
     METRO_P: 0.045,        // probabilidad de candidata a gran ciudad (si está lejos)
     METRO_MIN_DANGER: 2.6, // peligro base mínimo para una gran ciudad (~1 km del origen)
     INDOOR_DARK: 0.5,      // oscuridad extra dentro de edificios (de día)
