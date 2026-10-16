@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d0d0c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="description" content="Juego de supervivencia zombie 2D en un mundo infinito.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Tierra Muerta</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+  <div id="loading" class="screen show">
+    <div class="logo">TIERRA<span>MUERTA</span></div>
+    <div class="sub">Cargando el fin del mundo…</div>
+  </div>
+
+  <div id="title" class="screen">
+    <div class="panel">
+      <div class="col-a">
+        <div class="logo">TIERRA<span>MUERTA</span></div>
+        <div class="tagline">Los muertos aprenden. Tú también.</div>
+        <div id="records" class="info"></div>
+      </div>
+      <div class="col-b">
+        <div id="continueBox" class="hidden">
+          <button id="btnContinue" class="btn primary">Continuar partida</button>
+          <div id="continueInfo" class="info"></div>
+        </div>
+        <label class="field">
+          <span>Nombre del superviviente</span>
+          <input id="nameInput" type="text" maxlength="16" autocomplete="off" spellcheck="false" value="Daniel">
+        </label>
+        <button id="btnNew" class="btn">Nueva partida</button>
+        <div class="row">
+          <button id="btnImport" class="btn small">Importar partida</button>
+          <button id="btnSettings" class="btn small">Ajustes</button>
+        </div>
+      </div>
+      <input id="fileInput" type="file" accept=".json,application/json" class="hidden">
+    </div>
+    <div class="version">v<span id="ver"></span></div>
+  </div>
+
+  <div id="settings" class="screen">
+    <div class="panel">
+      <h2>Ajustes</h2>
+      <div class="setting">
+        <span>Calidad gráfica</span>
+        <div class="seg" id="segQuality">
+          <button data-v="low">Baja</button><button data-v="med">Media</button><button data-v="high">Alta</button>
+        </div>
+      </div>
+      <div class="setting">
+        <span>Sonido</span>
+        <div class="seg" id="segSound"><button data-v="on">Sí</button><button data-v="off">No</button></div>
+      </div>
+      <div class="setting">
+        <span>Vibración</span>
+        <div class="seg" id="segVibe"><button data-v="on">Sí</button><button data-v="off">No</button></div>
+      </div>
+      <button id="btnSettingsBack" class="btn">Volver</button>
+    </div>
+  </div>
+
+  <div id="pause" class="screen">
+    <div class="panel">
+      <h2>Pausa</h2>
+      <div id="pauseStats" class="info"></div>
+      <button id="btnResume" class="btn primary">Continuar</button>
+      <div class="row">
+        <button id="btnMute" class="btn small">Silencio</button>
+        <button id="btnPauseSettings" class="btn small">Ajustes</button>
+      </div>
+      <button id="btnExport" class="btn small">Exportar partida</button>
+      <button id="btnQuit" class="btn small">Guardar y salir</button>
+    </div>
+  </div>
+
+  <div id="gameover" class="screen">
+    <div class="panel">
+      <div class="dead">HAS MUERTO</div>
+      <div id="goStats" class="stats"></div>
+      <button id="btnRetry" class="btn primary">Nueva partida</button>
+      <button id="btnGoMenu" class="btn small">Menú principal</button>
+    </div>
+  </div>
+
+  <div id="confirm" class="screen">
+    <div class="panel">
+      <div id="confirmText" class="info big"></div>
+      <div class="row">
+        <button id="btnConfirmNo" class="btn small">Cancelar</button>
+        <button id="btnConfirmYes" class="btn small danger">Sí</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="rotate">
+  <div class="phone"></div>
+  <div>Gira tu teléfono a horizontal</div>
+</div>
+
+<script src="js/core/util.js"></script>
+<script src="js/core/config.js"></script>
+<script src="js/core/input.js"></script>
+<script src="js/core/save.js"></script>
+<script src="js/audio/audio.js"></script>
+<script src="js/world/world.js"></script>
+<script src="js/render/fx.js"></script>
+<script src="js/render/lighting.js"></script>
+<script src="js/render/renderer.js"></script>
+<script src="js/entities/player.js"></script>
+<script src="js/entities/combat.js"></script>
+<script src="js/ai/evolution.js"></script>
+<script src="js/ai/flowfield.js"></script>
+<script src="js/entities/zombie.js"></script>
+<script src="js/ai/director.js"></script>
+<script src="js/ui/hud.js"></script>
+<script src="js/ui/menus.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

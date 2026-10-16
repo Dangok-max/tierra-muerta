@@ -1,0 +1,113 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+  background: #0d0d0c; color: #d8d2c4;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  user-select: none; -webkit-user-select: none; touch-action: none; overscroll-behavior: none;
+}
+canvas#game { position: fixed; inset: 0; display: block; touch-action: none; }
+
+#ui { position: fixed; inset: 0; pointer-events: none; }
+.screen {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+  pointer-events: auto;
+  background: radial-gradient(ellipse at 50% 40%, rgba(40,14,10,0.55), rgba(5,5,5,0.92) 70%);
+}
+.screen.show { display: flex; flex-direction: column; }
+#pause.screen, #confirm.screen, #gameover.screen { background: rgba(5,5,5,0.72); }
+#loading.screen {
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(110,20,10,0.35), transparent 60%),
+    radial-gradient(ellipse at 50% 30%, #1d1a16, #070707 75%);
+}
+#title.screen, #settings.screen {
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(110,20,10,0.3), transparent 60%),
+    radial-gradient(ellipse at 50% 45%, rgba(10,9,8,0.55), rgba(5,5,5,0.88) 70%);
+}
+
+.panel {
+  width: min(440px, 92vw); max-height: 94vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 9px; padding: 16px 20px;
+  text-align: center;
+}
+.logo {
+  font-weight: 900; font-size: clamp(30px, 8vh, 54px); letter-spacing: 0.14em; line-height: 1;
+  color: #cfc6b4; text-shadow: 0 0 18px rgba(0,0,0,0.9), 0 3px 0 #000;
+  animation: flicker 6s infinite;
+}
+.logo span { display: block; color: #a3241a; letter-spacing: 0.2em; text-shadow: 0 0 22px rgba(160,20,10,0.55), 0 3px 0 #000; }
+@keyframes flicker { 0%, 92%, 100% { opacity: 1; } 93% { opacity: 0.55; } 94% { opacity: 1; } 96% { opacity: 0.7; } }
+.tagline { color: #8c8274; font-size: 13px; letter-spacing: 0.08em; margin-bottom: 4px; }
+.sub { margin-top: 14px; color: #8c8274; font-size: 14px; }
+h2 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0.15em; color: #cfc6b4; text-transform: uppercase; }
+
+.btn {
+  pointer-events: auto; appearance: none; border: 1px solid #4a4038; border-radius: 4px;
+  background: linear-gradient(#2a2622, #1c1a17); color: #d8d2c4;
+  font: 600 15px/1 system-ui, sans-serif; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 12px 14px; cursor: pointer; width: 100%;
+}
+.btn:active { transform: translateY(1px); background: #3a332c; }
+.btn.primary { background: linear-gradient(#7a1e16, #521410); border-color: #9a3024; color: #f0e6d6; }
+.btn.small { font-size: 13px; padding: 10px 12px; }
+.btn.danger { background: linear-gradient(#6a1a14, #45100c); border-color: #8a2a20; }
+.row { display: flex; gap: 8px; }
+.col-a, .col-b { display: flex; flex-direction: column; gap: 9px; }
+.hidden { display: none !important; }
+.info { font-size: 12px; color: #8c8274; line-height: 1.45; }
+.info.big { font-size: 15px; color: #cfc6b4; margin: 6px 0 10px; }
+
+.field { display: flex; flex-direction: column; gap: 4px; text-align: left; font-size: 12px; color: #8c8274; }
+.field input {
+  font: 600 16px system-ui, sans-serif; color: #e8e0d0; background: #141210; border: 1px solid #4a4038;
+  border-radius: 4px; padding: 10px; user-select: text; -webkit-user-select: text; touch-action: auto;
+}
+
+.setting { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; }
+.seg { display: flex; border: 1px solid #4a4038; border-radius: 4px; overflow: hidden; }
+.seg button {
+  appearance: none; border: 0; background: #1c1a17; color: #b0a696; padding: 9px 12px;
+  font: 600 13px system-ui, sans-serif; cursor: pointer;
+}
+.seg button.on { background: #7a1e16; color: #f0e6d6; }
+
+.dead { font-size: clamp(30px, 9vh, 52px); font-weight: 900; color: #a3241a; letter-spacing: 0.18em; text-shadow: 0 0 24px rgba(160,20,10,0.6); }
+.stats { font-size: 14px; line-height: 1.6; color: #cfc6b4; text-align: left; background: rgba(0,0,0,0.35); padding: 10px 14px; border-left: 2px solid #7a1e16; }
+.stats b { color: #e8c070; }
+.version { position: absolute; right: 10px; bottom: 6px; font-size: 11px; color: #5c544a; }
+
+#rotate {
+  position: fixed; inset: 0; display: none; flex-direction: column; gap: 18px; align-items: center; justify-content: center;
+  background: #0d0d0c; color: #cfc6b4; font-size: 16px; z-index: 10; text-align: center; padding: 20px;
+}
+#rotate .phone { width: 46px; height: 80px; border: 3px solid #cfc6b4; border-radius: 8px; animation: rot 2s infinite ease-in-out; }
+@keyframes rot { 0%, 20% { transform: rotate(0); } 60%, 100% { transform: rotate(90deg); } }
+@media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
+
+/* Pantallas bajas en horizontal (celulares): título en dos columnas, sin desplazamiento */
+@media (max-height: 430px) and (orientation: landscape) {
+  .panel { gap: 7px; padding: 10px 16px; }
+  #title .panel {
+    width: min(760px, 96vw);
+    display: grid; grid-template-columns: 1fr 1fr; column-gap: 26px; row-gap: 7px; align-items: center;
+  }
+  #title .col-a { grid-column: 1; grid-row: 1 / span 6; display: flex; flex-direction: column; gap: 8px; }
+  #title .col-b { grid-column: 2; display: flex; flex-direction: column; gap: 7px; }
+  .logo { font-size: clamp(28px, 11vh, 46px); }
+  .btn { padding: 10px 12px; }
+  .btn.small { padding: 8px 10px; }
+  .field input { padding: 8px; }
+  #settings .panel, #pause .panel, #gameover .panel, #confirm .panel { width: min(480px, 92vw); }
+  .dead { font-size: clamp(26px, 10vh, 44px); }
+  .stats { font-size: 13px; line-height: 1.45; }
+}
+
+/* Pantalla de muerte en pantallas bajas: estadísticas a la izquierda, botones a la derecha */
+@media (max-height: 430px) and (orientation: landscape) {
+  #gameover .panel { width: min(800px, 96vw); display: grid; grid-template-columns: 1.4fr 1fr; column-gap: 18px; row-gap: 8px; align-items: start; }
+  #gameover .dead { grid-column: 1 / span 2; }
+  #gameover .stats { grid-column: 1; grid-row: 2 / span 2; max-height: 70vh; overflow-y: auto; }
+  #gameover #btnRetry { grid-column: 2; grid-row: 2; }
+  #gameover #btnGoMenu { grid-column: 2; grid-row: 3; }
+}
