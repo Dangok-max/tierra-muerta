@@ -56,12 +56,29 @@
   const CHARGE_WINDUP = 0.6;
   const STUN_TIME = 1.2;
   const BUSY = { stagger: 1, windup: 1, recover: 1, crouch: 1, lunge: 1, cwind: 1, charge: 1, brake: 1, stun: 1, inflate: 1, dodge: 1, rise: 1 };
-  const PASSIVE = { wander: 1, search: 1, investigate: 1 };
+  const PASSIVE = { wander: 1, search: 1, investigate: 1, dormant: 1 };
+  // estados en los que se desplaza hacia un objetivo (pueden toparse con una puerta cerrada y golpearla)
+  const MOVERS = { chase: 1, investigate: 1, stalk: 1, keepaway: 1, cover: 1 };
   const TOKEN_STATES = { chase: 1, windup: 1, recover: 1, crouch: 1, lunge: 1, keepaway: 1 };
   const CROUCH_TIME = 0.45;    // telegrafiado del salto del acechador (siseo + agazapado)
   const CHARGE_DMG = 1.4;      // multiplicador de daño de la embestida del tanque
   const VARIANTS = { normal: 8, acechador: 3, griton: 3, tanque: 2 };
   const TYPE_SEED = { normal: 1013, acechador: 2027, griton: 3041, tanque: 4057 };
+
+  // ---------- percepción a escala real (32 u = 1 m) ----------
+  const SIGHT_DAY = 600;          // ~19 m a plena luz
+  const SIGHT_NIGHT = 190;        // ~6 m de noche cerrada (acechador ~10 m)
+  const SIGHT_NIGHT_STALKER = 330;
+  const SIGHT_BEAM = 760;         // la linterna apuntándoles los delata a ~24 m
+  const SIGHT_LIGHT = 380;        // linterna encendida pero no hacia ellos (~12 m)
+  const REAR_FEEL = 40;           // sin alerta: por detrás solo notan al jugador a ~1,25 m
+  const FOV_HALF = 1.75;          // semiángulo de visión sin alerta (~100°)
+  const DORMANT_SIGHT = 0.55;     // dormidos/quietos: ven peor
+  const DORMANT_HEAR = 0.6;       // y oyen peor
+  // ruido: por debajo de esta fracción del radio, van con prisa a investigar
+  const NOISE_URGENT = { shot: 0.75, explosion: 0.9, chest_alarm: 0.7, glass: 0.55, door_bash: 0.45, shove: 1, impact: 0.35, flare: 0.3 };
+  const BASH_CD = [0.9, 1.4];     // s entre golpes a una puerta
+  const BASH_SND = new WeakMap(); // puerta -> último golpe sonado (evita saturar el audio)
 
   const TMP = { x: 0, y: 0 };
   const QBUF = [];
@@ -69,8 +86,8 @@
 
   // ---------- caché de sprites (cuerpo + ropa + contorno pre-renderizados por variante y pose) ----------
   const SPRITE_BUDGET = 8;                     // sprites nuevos por frame como máximo (si no, dibujo vectorial)
-  // memoria máxima del caché según la calidad; al superarla se vacía y se reconstruye a demanda
-  const SPRITE_MAX_MB = { low: 8, med: 14, high: 24 };
+  // memoria máxima del caché según la calidad; al superarla se expulsan los sprites menos usados (LRU)
+  const SPRITE_MAX_MB = { low: 12, med: 16, high: 24 };
   const OUTLINE = 'rgba(12,10,8,0.62)';        // contorno oscuro sutil: mejor lectura sobre el suelo
   const OUTLINE_CORPSE = 'rgba(12,10,8,0.4)';
   const OUT_OFFS = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]];
@@ -80,8 +97,22 @@
     griton: [-1.2, 1.4, -1.2, 1.2], tanque: [-1.0, 2.4, -1.85, 1.85], corpse: [-1.75, 1.75, -1.55, 1.55],
   };
   const POSE = { sw: 0, raise: 0, strike: 0, crouch: 0, lunge: 0, open: 0, corpse: 0, twitch: 0 };
-  const SPR = { map: new Map(), S: 0, bytes: 0, budget: SPRITE_BUDGET, lastT: 0, scratch: null, shadow: null, glow: {}, built: 0, gen: 0 };
+  const SPR = { map: new Map(), S: 0, bytes: 0, budget: SPRITE_BUDGET, lastT: 0, scratch: null, shadow: null, glow: {}, built: 0, gen: 0, tick: 0, evicted: 0 };
   function clearCache() { SPR.map.clear(); SPR.bytes = 0; SPR.gen++; }
+  // Expulsa los sprites usados hace más tiempo hasta bajar al 80 % del tope
+  function evictLRU(maxBytes) {
+    const arr = [];
+    for (const [k, sp] of SPR.map) arr.push([sp.lu || 0, k, sp]);
+    arr.sort((a, b) => a[0] - b[0]);
+    const goal = maxBytes * 0.8;
+    for (let i = 0; i < arr.length && SPR.bytes > goal; i++) {
+      const sp = arr[i][2];
+      SPR.map.delete(arr[i][1]);
+      SPR.bytes -= sp.c.width * sp.c.height * 4;
+      sp.dead = true;               // los zombies que lo tenían memorizado lo piden de nuevo
+      SPR.evicted++;
+    }
+  }
 
   function newCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 
@@ -96,14 +127,16 @@
     const S = spriteScale();
     if (S !== SPR.S) { clearCache(); SPR.S = S; }
     let sp = SPR.map.get(key);
-    if (sp) return sp;
+    if (sp) { sp.lu = SPR.tick; return sp; }
     const now = performance.now();
-    if (now - SPR.lastT > 12) { SPR.lastT = now; SPR.budget = SPRITE_BUDGET; }
+    if (now - SPR.lastT > 12) { SPR.lastT = now; SPR.budget = SPRITE_BUDGET; SPR.tick++; }
     if (SPR.budget <= 0) return null;
     SPR.budget--;
     const q = TM.Config && TM.Config.quality;
-    if (SPR.bytes > (SPRITE_MAX_MB[q] || 14) * 1048576) clearCache();
+    const maxB = (Zombie.spriteLimitMB || SPRITE_MAX_MB[q] || 16) * 1048576;
+    if (SPR.bytes > maxB) evictLRU(maxB);
     sp = buildSprite(z, P, S);
+    sp.lu = SPR.tick;
     SPR.map.set(key, sp);
     SPR.bytes += sp.c.width * sp.c.height * 4;
     SPR.built++;
@@ -247,6 +280,11 @@
       this.invOX = Math.cos(ia) * ir; this.invOY = Math.sin(ia) * ir;
       this.twitchT = rr(2, 6); this.twitch = 0;
       this.speedMag = 0;
+      this.bashDoor = null; this.bashT = 0;        // puerta cerrada que está golpeando
+      this.bId = null; this.bT = 0;                // edificio en el que está (cacheado ~1 s)
+      this._thX = x; this._thY = y; this._realSpd = 0;
+      this.indoor = !!opts.indoor;                 // apareció dentro de un edificio
+      this.fireFxT = -9;                           // último efecto de quemadura (sangre/sonido limitados)
       this._pd = 9999; this._nx = 0; this._ny = 0; this._snap = false;
       this.voice = this.type === 'tanque' ? 0.6 : this.type === 'griton' ? 1.3 : this.type === 'acechador' ? 1.2 : rr(0.85, 1.12);
       // aspecto: variantes compartidas por tipo (permiten reutilizar sprites)
@@ -256,6 +294,7 @@
 
       if (opts.state === 'fakeDead') this.setFakeDead();
       else if (opts.state === 'ambush') { this.state = 'ambush'; this.crouch = 0.6; }
+      else if (opts.state === 'dormant') { this.state = 'dormant'; this.idle = true; }
       if (opts.alertX != null) this.alertTo(opts.alertX, opts.alertY, opts.knows !== false);
     }
 
@@ -276,7 +315,8 @@
       this.hp = s.hp * frac;
       if (initial) this.vf = 1 + (Math.random() * 2 - 1) * s.speedVar;
       if (!this.runner && s.runChance > 0 && Math.random() < s.runChance) this.runner = true;
-      this.chaseSpeed = (this.runner ? s.runSpeed : s.speed) * this.vf;
+      this.baseChase = (this.runner ? s.runSpeed : s.speed) * this.vf;
+      this.chaseSpeed = this.baseChase * (this.nightK || 1);
       this.wanderSpeed = Math.min(s.speed * this.vf, 60) * 0.4;
     }
 
@@ -337,7 +377,9 @@
         case 'withdraw': this.withdrawDur = rr(1.5, 2.5); break;
         case 'stalk': this.stalkT = 0; break;
         case 'wander': this.urgent = false; this.wanderDur = rr(0.5, 2); break;
+        case 'dormant': this.urgent = false; this.idle = true; break;
       }
+      if (!MOVERS[s]) this.bashDoor = null;
     }
 
     _resumeState() {
@@ -386,7 +428,9 @@
       sfx(this.type === 'acechador' ? 'stalker_hiss' : 'zombie_groan', this.x, this.y, { pitch: this.voice * 0.9, volume: 1 });
     }
 
-    // Ruido percibido (llamado por el director)
+    // Ruido percibido (llamado por el director). frac = distancia / radio efectivo (0 = encima, 1 = límite).
+    // kind: 'shot' | 'shove' | 'scream' | 'footstep' | 'impact' | 'melee' | 'door' | 'door_bash' | 'chest' |
+    // 'chest_alarm' | 'explosion' | 'glass' | 'flare'
     hearNoise(x, y, kind, frac, g) {
       if (this.dead) return;
       const st = this.state;
@@ -398,11 +442,16 @@
         if (PASSIVE[st]) this.setState(this._resumeState());
         return;
       }
+      if (kind === 'door_bash' && this.bashDoor) return;         // su propio golpe (o el de su grupo)
+      if (st === 'dormant' && frac > DORMANT_HEAR) return;      // adormilado: solo despierta con ruido cercano
       if (this.seesPlayer) return;
+      if (this.alerted && this.unseenT < LOSE_TRACK && kind !== 'flare') return; // lo está siguiendo: no se distrae
       this.lkX = x; this.lkY = y; // cada uno investiga alrededor con su propio desplazamiento (invOX/invOY)
       if (PASSIVE[st]) {
-        this.urgent = kind === 'shot' ? frac < 0.75 : kind === 'shove';
+        this.urgent = frac < (NOISE_URGENT[kind] || 0);
         this.setState('investigate');
+        // se gira hacia el ruido (así puede ver al jugador si está ahí)
+        this.angle = Math.atan2(y - this.y, x - this.x) + rr(-0.3, 0.3);
       }
     }
 
@@ -425,7 +474,7 @@
 
       this.thinkT -= dt;
       if (this.thinkT <= 0) {
-        const far = !this.alerted && this._pd > 800;
+        const far = (!this.alerted && this._pd > 800) || this.state === 'dormant';
         const iv = far ? rr(0.4, 0.6) : rr(0.15, 0.3);
         this.thinkT = iv;
         this.think(g, dir);
@@ -439,9 +488,10 @@
       this.groanT -= dt;
       if (this.groanT <= 0) {
         this.groanT = rr(5, 13);
-        if (this._pd < 750 && this.state !== 'fakeDead' && this.state !== 'ambush' && dir && dir.canGroan()) {
+        const dorm = this.state === 'dormant';
+        if (this._pd < 750 && this.state !== 'fakeDead' && this.state !== 'ambush' && (!dorm || Math.random() < 0.3) && dir && dir.canGroan()) {
           if (this.type === 'acechador') { if (this.alerted) sfx('stalker_hiss', this.x, this.y, { volume: 0.35 }); }
-          else sfx('zombie_groan', this.x, this.y, { pitch: this.voice * rr(0.92, 1.08), volume: this.alerted ? 0.9 : 0.6 });
+          else sfx('zombie_groan', this.x, this.y, { pitch: this.voice * rr(0.92, 1.08), volume: this.alerted ? 0.9 : dorm ? 0.35 : 0.6 });
         }
       }
     }
@@ -453,6 +503,19 @@
       const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
       this._pd = d;
       const pAlive = p.alive !== false;
+      // edificio actual (para oscuridad interior y amortiguar ruidos de fuera) y ritmo nocturno
+      this.bT -= this.lastThink;
+      if (this.bT <= 0) {
+        this.bT = rr(0.8, 1.2);
+        const w = g.world, b = w && w.buildingAt ? w.buildingAt(this.x, this.y) : null;
+        this.bId = b ? b.id : null;
+        const dark = g.darkness || 0;
+        this.nightK = 1 + dark * (this.runner || this.type === 'acechador' ? 0.15 : 0.08);
+        this.chaseSpeed = this.baseChase * this.nightK;
+      }
+      // avance real desde el último pensamiento (para detectar que algo lo frena: puertas)
+      this._realSpd = Math.hypot(this.x - this._thX, this.y - this._thY) / (this.lastThink || 0.2);
+      this._thX = this.x; this._thY = this.y;
       this._stuckCheck(g);
       const st = this.state;
 
@@ -470,11 +533,17 @@
       if (this.seesPlayer) {
         this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
         if (!this.alerted) this._onSpot(g, dir);
-      } else if (d < (50 + 230 * (p.noise || 0)) * this.s.hearing) {
-        // oye pasos cercanos
-        this.lkX = p.x; this.lkY = p.y;
-        if (this.alerted) this.unseenT = Math.min(this.unseenT, 0.5);
-        else if (this.state === 'wander' || this.state === 'search') { this.urgent = false; this.setState('investigate'); }
+      } else if (d < (50 + 230 * (p.noise || 0)) * this.s.hearing * (this.state === 'dormant' ? DORMANT_HEAR : 1)) {
+        // oye pasos cercanos (sin pasar por paredes gruesas: si hay muro entre medias, la mitad)
+        const w = g.world;
+        if (d < (25 + 115 * (p.noise || 0)) * this.s.hearing || !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y)) {
+          this.lkX = p.x; this.lkY = p.y;
+          if (this.alerted) this.unseenT = Math.min(this.unseenT, 0.5);
+          else if (this.state === 'wander' || this.state === 'search' || this.state === 'dormant') {
+            this.urgent = false; this.setState('investigate');
+            this.angle = Math.atan2(dy, dx) + rr(-0.4, 0.4);
+          }
+        }
       }
       // guiados por el grito: conocen la posición del jugador un rato
       if (this.homing > 0) {
@@ -500,26 +569,32 @@
         default: this._thinkNormal(g, dir, p, d, knows);
       }
       this._planNav(g, p, knows);
+      this._doorCheck(g, dir);
     }
 
     _canSee(g, p, d) {
-      const dark = g.darkness || 0;
+      const w = g.world;
+      let dark = g.darkness || 0;
+      // dentro de un edificio (el zombie o el jugador) hay menos luz
+      const ind = (TM.Config && TM.Config.WORLD && TM.Config.WORLD.INDOOR_DARK) || 0.5;
+      if (this.bId || (w && w.curB && w.curB.indoor)) dark = Math.max(dark, ind);
       const wx = g.weather || {};
-      let range = lerp(450, this.type === 'acechador' ? 270 : 150, dark);
+      let range = lerp(SIGHT_DAY, this.type === 'acechador' ? SIGHT_NIGHT_STALKER : SIGHT_NIGHT, dark);
       if (p.flashlightOn && dark > 0.15) {
         // la linterna lo delata: muy lejos si apunta hacia ellos, bastante si no
         const a = Math.atan2(this.y - p.y, this.x - p.x);
         const inBeam = Math.abs(angDiff(p.aimAngle, a)) < 0.5;
-        range = Math.max(range, lerp(450, inBeam ? 760 : 380, dark));
+        range = Math.max(range, lerp(SIGHT_DAY, inBeam ? SIGHT_BEAM : SIGHT_LIGHT, dark));
       }
       range *= (1 - 0.5 * (wx.fog || 0)) * (1 - 0.15 * (wx.rain || 0)) * this.s.sight;
-      // sin alerta: campo de visión frontal
-      if (!this.alerted && d > 110) {
+      if (this.state === 'dormant') range *= DORMANT_SIGHT;
+      // sin alerta: campo de visión frontal; por detrás solo lo notan pegado
+      if (!this.alerted && d > REAR_FEEL) {
         const a2 = Math.atan2(p.y - this.y, p.x - this.x);
-        if (Math.abs(angDiff(this.angle, a2)) > 1.75) range *= 0.45;
+        if (Math.abs(angDiff(this.angle, a2)) > FOV_HALF) return false;
       }
       if (d > range) return false;
-      const w = g.world;
+      // paredes, puertas cerradas y muebles altos tapan la vista
       return !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y);
     }
 
@@ -549,16 +624,22 @@
       if (this.alerted) {
         if (knows) return false;
         if (st === 'search') {
-          if (this.stateT > this.searchDur) { this.alerted = false; this.flankAngle = null; this.setState('wander'); }
+          if (this.stateT > this.searchDur) { this.alerted = false; this.flankAngle = null; this.setState(this._calmState()); }
           return true;
         }
         if (st !== 'investigate') { this.urgent = true; this.setState('investigate'); }
         return true;
       }
-      if (st === 'search') { if (this.stateT > this.searchDur) this.setState('wander'); return true; }
+      if (st === 'search') { if (this.stateT > this.searchDur) this.setState(this._calmState()); return true; }
+      if (st === 'dormant') return true;
       if (st === 'wander') { this._thinkWander(g, p, d); return true; }
       if (st !== 'investigate') this.setState('wander');
       return true;
+    }
+
+    // Tras buscar sin éxito: los de interior vuelven a quedarse quietos (si siguen dentro), el resto deambula
+    _calmState() {
+      return this.indoor && this.bId && Math.random() < 0.7 ? 'dormant' : 'wander';
     }
 
     _thinkWander(g, p, d) {
@@ -583,7 +664,7 @@
     // Jugador muerto: se acercan al cuerpo y se quedan ahí
     _thinkFeed(p, d) {
       this.seesPlayer = false;
-      if (!this.alerted && d > 400) { if (this.state !== 'wander' && this.state !== 'search') this.setState('wander'); return; }
+      if (!this.alerted && d > 400) { if (this.state !== 'wander' && this.state !== 'search' && this.state !== 'dormant') this.setState('wander'); return; }
       this.alerted = true;
       this.lkX = p.x; this.lkY = p.y;
       if (this.state !== 'investigate' && this.state !== 'search') { this.urgent = false; this.setState('investigate'); }
@@ -892,6 +973,116 @@
       return true;
     }
 
+    // ¿Nada sólido entre él y el jugador? (no golpea a través de paredes ni puertas cerradas)
+    _clearTo(g, p) {
+      const w = g.world;
+      return !w || !w.raycast || w.raycast(this.x, this.y, p.x, p.y) >= 0.999;
+    }
+
+    // ¿Se topó con una puerta cerrada que le corta el paso? Entonces la golpea hasta romperla.
+    _doorCheck(g, dir) {
+      const w = g.world;
+      if (!w || !w.doorsNear || !w.damageDoor) return;
+      const bd = this.bashDoor;
+      if (bd) {
+        // sigue siendo válida: cerrada, pegado a ella y sin camino directo al jugador
+        const px = clamp(this.x, bd.x, bd.x + bd.w), py = clamp(this.y, bd.y, bd.y + bd.h);
+        const far = Math.hypot(this.x - px, this.y - py) > this.r + 10;
+        if (bd.open || bd.broken || far || !MOVERS[this.state] || (this.seesPlayer && this.navDirect)) this.bashDoor = null;
+        return;
+      }
+      if (!MOVERS[this.state] || this.waitT > 0 || this.navTX === null) return;
+      // solo si algo lo frena de verdad (avance real muy por debajo del deseado)
+      if (this._realSpd > this.wantSpd * 0.6 || this.wantSpd < 8) return;
+      // dirección en la que quiere avanzar
+      let nx = this._nx, ny = this._ny;
+      if (this.detourT > 0) return;
+      if (nx * nx + ny * ny < 0.25) {
+        const ex = this.navTX - this.x, ey = this.navTY - this.y, L = Math.sqrt(ex * ex + ey * ey);
+        if (L < 1) return;
+        nx = ex / L; ny = ey / L;
+      }
+      const doors = w.doorsNear(this.x, this.y, this.r + 6);
+      for (let i = 0; i < doors.length; i++) {
+        const d = doors[i];
+        if (d.open || d.broken) continue;
+        const px = clamp(this.x, d.x, d.x + d.w), py = clamp(this.y, d.y, d.y + d.h);
+        let ex = px - this.x, ey = py - this.y;
+        const L = Math.sqrt(ex * ex + ey * ey);
+        if (L > this.r + 6) continue;
+        if (L > 0.5) { ex /= L; ey /= L; } else { ex = d.cx - this.x; ey = d.cy - this.y; const l2 = Math.hypot(ex, ey) || 1; ex /= l2; ey /= l2; }
+        if (ex * nx + ey * ny < 0.35) continue;                 // no quiere ir hacia ella
+        // el tanque no cabe por las puertas sencillas: no intenta entrar por ellas (ver _pound)
+        if (this.type === 'tanque' && Math.max(d.w, d.h) < this.r * 2 + 4 && !this._wideDoor(w, d)) continue;
+        this.bashDoor = d;
+        this.bashT = rr(0.3, 0.6);
+        return;
+      }
+    }
+
+    // Puerta doble: otra hoja contigua en la misma pared
+    _wideDoor(w, d) {
+      const near = w.doorsNear(d.cx, d.cy, Math.max(d.w, d.h));
+      for (let i = 0; i < near.length; i++) {
+        const e = near[i];
+        if (e !== d && e.horiz === d.horiz && e.buildingId === d.buildingId && (d.horiz ? Math.abs(e.y - d.y) < 2 : Math.abs(e.x - d.x) < 2)) return true;
+      }
+      return false;
+    }
+
+    // Un golpe a la puerta
+    _bashHit(g, d, pd) {
+      const w = g.world, tank = this.type === 'tanque';
+      this.bashT = rr(BASH_CD[0], BASH_CD[1]) * (tank ? 1.25 : 1);
+      this.strike = 1;
+      const dmg = this.s.damage * (tank ? 3.2 : 1) * rr(0.8, 1.2);
+      const broke = w.damageDoor(d.id, dmg);
+      const now = g.time || 0;
+      const last = BASH_SND.get(d);
+      if (broke || last === undefined || now - last > 0.3) {
+        BASH_SND.set(d, now);
+        sfx(broke ? 'door_break' : 'door_bash', d.cx, d.cy, { pitch: tank ? 0.75 : rr(0.9, 1.1), volume: broke ? 1 : 0.85 });
+      }
+      fx(g, 'dust', d.cx, d.cy, broke ? 8 : 2);
+      if (broke) fx(g, 'spark', d.cx, d.cy, this.x < d.cx ? 1 : -1, this.y < d.cy ? 1 : -1, 6);
+      if (g.shake && pd < 260) g.shake(broke ? 3 : 1);
+      if (g.emitNoise) g.emitNoise(d.cx, d.cy, broke ? 480 : 400, 'door_bash');
+      if (broke) this.bashDoor = null;
+    }
+
+    // Tanque sin camino (puertas estrechas, muros): aporrea la pared o la puerta que le separa de su objetivo
+    // (dx, dy, d = vector y distancia al objetivo). Devuelve el nivel de brazos alzados para la animación.
+    _pound(dt, g, dx, dy, d) {
+      this.bashT -= dt;
+      if (this.bashT > 0) return this.bashT < 0.35 ? 1 : 0;
+      this.bashT = rr(1.3, 1.9);
+      const w = g.world;
+      if (!w) return 0;
+      const ux = dx / d, uy = dy / d;
+      // ¿puerta cerrada pegada?
+      if (w.doorsNear && w.damageDoor) {
+        const doors = w.doorsNear(this.x + ux * this.r, this.y + uy * this.r, this.r + 8);
+        for (let i = 0; i < doors.length; i++) {
+          const dr = doors[i];
+          if (dr.open || dr.broken) continue;
+          this._bashHit(g, dr, this._pd);
+          return 1;
+        }
+      }
+      // ¿pared o mueble pegado en dirección al jugador?
+      if (!w.raycast) return 0;
+      const L = this.r + 22;
+      const t = w.raycast(this.x, this.y, this.x + ux * L, this.y + uy * L);
+      if (t >= 1) return 0;
+      const hx = this.x + ux * L * t, hy = this.y + uy * L * t;
+      this.strike = 1;
+      sfx('door_bash', hx, hy, { pitch: 0.6, volume: 0.9 });
+      fx(g, 'dust', hx, hy, 4);
+      if (g.shake && this._pd < 300) g.shake(2);
+      if (g.emitNoise) g.emitNoise(hx, hy, 350, 'door_bash');
+      return 1;
+    }
+
     // Dirección de navegación hacia (tx, ty)
     _nav(tx, ty, dir, allowFlow) {
       if (this.detourT > 0) { this._nx = Math.cos(this.detourA); this._ny = Math.sin(this.detourA); return; }
@@ -901,7 +1092,11 @@
       if (allowFlow && dir && (!this.navDirect || this.forceFlowT > 0)) {
         // los grandes usan el campo con obstáculos más inflados (no intentan huecos estrechos)
         const big = this.r >= 16 && dir.flowBig && dir.flowBig.valid;
-        if ((big && dir.flowBig.dirAt(this.x, this.y, TMP)) || (dir.flow && dir.flow.dirAt(this.x, this.y, TMP))) {
+        if (big) {
+          // sin camino para su cuerpo (puertas estrechas): va en línea recta y acaba golpeando la pared
+          if (dir.flowBig.dirAt(this.x, this.y, TMP)) { this._nx = TMP.x; this._ny = TMP.y; return; }
+          if (!dir.flowBig.inField(this.x, this.y) && dir.flow && dir.flow.dirAt(this.x, this.y, TMP)) { this._nx = TMP.x; this._ny = TMP.y; return; }
+        } else if (dir.flow && dir.flow.dirAt(this.x, this.y, TMP)) {
           this._nx = TMP.x; this._ny = TMP.y; return;
         }
       }
@@ -935,10 +1130,20 @@
           this.angle += Math.sin(this.stateT * 1.7 + this.id) * dt * 1.2;
           break;
 
+        case 'dormant':
+          // quieto, balanceándose apenas, hasta oír o ver algo
+          this.angle += Math.sin(this.stateT * 0.4 + this.id) * dt * 0.15;
+          break;
+
         case 'investigate': {
           const ix = this.lkX + this.invOX, iy = this.lkY + this.invOY;
           const ex = ix - this.x, ey = iy - this.y;
           if (ex * ex + ey * ey < 24 * 24) { this.setState('search'); break; }
+          if (this.waitT > 0) { // sin camino para su cuerpo: espera mirando hacia allí (el tanque aporrea)
+            faceA = Math.atan2(ey, ex);
+            if (this.type === 'tanque' && d < 420) raise = this._pound(dt, g, ex, ey, Math.sqrt(ex * ex + ey * ey));
+            break;
+          }
           spd = this.urgent ? this.chaseSpeed : Math.max(this.wanderSpeed * 1.6, this.chaseSpeed * 0.55);
           this._nav(ix, iy, dir, true);
           break;
@@ -947,12 +1152,16 @@
         case 'chase': {
           let tx, ty;
           if (!knows) { tx = this.lkX; ty = this.lkY; } else if (this.flanking) { tx = this.tx; ty = this.ty; } else { tx = p.x; ty = p.y; }
-          if (this.waitT > 0 && d > reach + 40) { faceA = Math.atan2(dy, dx); break; } // al acecho
+          if (this.waitT > 0 && d > reach + 40) { // al acecho (sin camino para su cuerpo)
+            faceA = Math.atan2(dy, dx);
+            if (this.type === 'tanque' && d < 420) raise = this._pound(dt, g, tx - this.x, ty - this.y, Math.hypot(tx - this.x, ty - this.y) || 1);
+            break;
+          }
           spd = this.chaseSpeed;
-          if (knows && d < reach + 40) {
+          if (knows && d < reach + 40 && this._clearTo(g, p)) {
             if (this.atkCd <= 0 && dir) dir.requestToken(this);
             if (this.hasToken) {
-              if (d <= reach - 2) { this.setState('windup'); break; }
+              if (d <= reach - 2 && this._clearTo(g, p)) { this.setState('windup'); break; }
               if (this.tokenT > 2.5) dir.releaseToken(this); // no logra llegar: cede el turno
             } else {
               // sin turno de ataque: rodea a corta distancia
@@ -1125,6 +1334,19 @@
           break;
       }
 
+      // golpeando una puerta cerrada que le corta el paso
+      if (this.bashDoor) {
+        const bd = this.bashDoor;
+        if (bd.open || bd.broken || !MOVERS[this.state]) this.bashDoor = null;
+        else {
+          spd = 0; this._nx = 0; this._ny = 0;
+          faceA = Math.atan2(bd.cy - this.y, bd.cx - this.x);
+          raise = 0.6;
+          this.bashT -= dt;
+          if (this.bashT <= 0) this._bashHit(g, bd, d);
+        }
+      }
+
       // velocidad con suavizado (o directa en embestidas/esquivas)
       this.wantSpd = spd;
       if (this._snap) {
@@ -1177,7 +1399,7 @@
       const p = g.player;
       this.strike = 1;
       this.atkCd = this.s.attackCooldown * rr(0.9, 1.15);
-      if (p.alive !== false && d <= reach + 7) {
+      if (p.alive !== false && d <= reach + 7 && this._clearTo(g, p)) {
         let dmg = this.s.damage * rr(0.9, 1.1);
         if (this.type === 'acechador') {
           // por la espalda duele más
@@ -1219,6 +1441,19 @@
       if (g.shake && this._pd < 400) g.shake(5);
       fx(g, 'dust', this.x + this.chargeDX * this.r, this.y + this.chargeDY * this.r, 8);
       sfx('tank_stomp', this.x, this.y, { volume: 1, pitch: 0.7 });
+      // si chocó contra una puerta cerrada, la revienta (o casi)
+      const w = g.world;
+      if (w && w.doorsNear && w.damageDoor) {
+        const doors = w.doorsNear(this.x + this.chargeDX * this.r, this.y + this.chargeDY * this.r, this.r);
+        for (let i = 0; i < doors.length; i++) {
+          const d = doors[i];
+          if (d.open || d.broken) continue;
+          const broke = w.damageDoor(d.id, this.s.damage * 8);
+          sfx(broke ? 'door_break' : 'door_bash', d.cx, d.cy, { pitch: 0.7, volume: 1 });
+          if (g.emitNoise) g.emitNoise(d.cx, d.cy, 500, 'door_bash');
+          break;
+        }
+      }
     }
 
     _scream(g, dir) {
@@ -1239,12 +1474,24 @@
       const res = dir && dir.resistFor ? dir.resistFor(kind) : 0;
       const dmg = amount * (1 - res);
       this.hp -= dmg;
-      this.flash = 1;
       this.unhitT = 0;
-      const kb = (kind === 'explosion' ? 260 : kind === 'vehicle' ? 300 : kind === 'melee' ? 60 : 45) * (this.type === 'tanque' ? 0.12 : 1);
-      this.kx += dirX * kb; this.ky += dirY * kb;
-      fx(g, 'blood', this.x, this.y, dirX, dirY, dmg > 25 ? 8 : 5);
-      sfx('hit_flesh', this.x, this.y);
+      if (kind === 'fire') {
+        // quemadura en el tiempo: sin sangre ni empuje; destello y sonido como mucho cada ~0,8 s
+        const now = (g && g.time) || 0;
+        if (now - this.fireFxT > 0.8) {
+          this.fireFxT = now;
+          this.flash = 0.6;
+          sfx('hit_flesh', this.x, this.y, { volume: 0.4, pitch: 1.25 });
+        }
+      } else {
+        this.flash = 1;
+        // la explosión empuja con fuerza (combat.js además lo tambalea con shove); el tanque apenas se mueve
+        const kb = (kind === 'explosion' ? 260 : kind === 'vehicle' ? 300 : kind === 'melee' ? 60 : 45) * (this.type === 'tanque' ? 0.12 : 1);
+        this.kx += dirX * kb; this.ky += dirY * kb;
+        fx(g, 'blood', this.x, this.y, dirX, dirY, dmg > 25 ? 8 : 5);
+        sfx('hit_flesh', this.x, this.y);
+        if (kind === 'explosion' && this.bashDoor) this.bashDoor = null;
+      }
       if (dir && dir.onDamage) dir.onDamage(this, kind, dmg);
 
       if (this.state === 'fakeDead') this.rise(g);
@@ -1362,7 +1609,8 @@
     // Sprite actual (memorizado mientras no cambie la pose ni el caché)
     _sprite(P) {
       const code = this._pose(P);
-      if (code === this._sprCode && this._sprGen === SPR.gen && this._spr && SPR.S === spriteScale()) return this._spr;
+      const m = this._spr;
+      if (code === this._sprCode && this._sprGen === SPR.gen && m && !m.dead && SPR.S === spriteScale()) { m.lu = SPR.tick; return m; }
       const sp = getSprite(this, this.type + this.variant + '|' + code, P);
       this._spr = sp; this._sprCode = sp ? code : -1; this._sprGen = SPR.gen;
       return sp;
@@ -1753,6 +2001,7 @@
   Zombie.sfx = sfx;
   Zombie.fx = fx;
   Zombie.clearSprites = clearCache;
-  Zombie.spriteStats = function () { return { count: SPR.map.size, kb: Math.round(SPR.bytes / 1024), built: SPR.built, scale: SPR.S }; };
+  Zombie.spriteLimitMB = 0;   // > 0: tope del caché en MB (pruebas); 0 = según la calidad
+  Zombie.spriteStats = function () { return { count: SPR.map.size, kb: Math.round(SPR.bytes / 1024), built: SPR.built, evicted: SPR.evicted, scale: SPR.S }; };
   TM.Zombie = Zombie;
 })();

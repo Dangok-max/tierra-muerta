@@ -47,6 +47,15 @@
   const INTENSITY_HP = 60;         // daño recibido que suma 1 de intensidad
   const RELAX_TIME = [14, 24];     // duración de la calma (s)
   const RELAX_POP = 0.45;          // fracción de la población objetivo durante la calma
+  // ---- interiores (pistas de aparición del mundo v2) ----
+  const INDOOR_SCAN = 1.3;         // s entre barridos de pistas de interior
+  const INDOOR_SHARE = 0.45;       // fracción máxima de la población que puede estar dormida en interiores
+  const INDOOR_WEIGHT = 0.6;       // cuánto cuenta un dormido de interior para la población objetivo de exterior
+  const INDOOR_MIN_D = 260;        // no aparecen más cerca que esto (~8 m), y nunca a la vista
+  const INDOOR_FORGET = 1900;      // una pista se puede volver a tirar cuando el jugador se aleja tanto
+  const STRONG_BT = { hospital: 1, police: 1, military: 1, bunker: 1 }; // más y más fuertes
+  const NOISE_AMBUSH = { shot: 1, scream: 1, impact: 1, explosion: 1, chest_alarm: 1 };
+  const MUFFLE = 0.6;              // ruido a través de paredes (otro edificio / dentro↔fuera)
 
   const KINDS = ['bullet', 'melee', 'fire', 'explosion'];
   const KIND_MAP = {
@@ -119,7 +128,7 @@
       this.flow = TM.FlowField ? new TM.FlowField(80, 80, 16) : null;
       // segundo campo con obstáculos más inflados para zombis grandes (tanques): evita huecos estrechos
       this.flowBig = TM.FlowField ? new TM.FlowField(80, 80, 16) : null;
-      if (this.flowBig) this.flowBig.inflate = BIG_INFLATE;
+      if (this.flowBig) { this.flowBig.inflate = BIG_INFLATE; this.flowBig.minDoor = 44; } // el tanque (r 20) no cabe por puertas de 34–38 u
       this._needBig = false;
       this.stage = 1;
       this._lastDay = null;
@@ -143,13 +152,15 @@
       this.notifyQ = []; this.notifyT = 1.5;
       this.fleeNotifyT = 0;
       this.screamTip = false;
-      this.info = { living: 0, alerted: 0, chasers: 0, chaseA: 0, counts: { normal: 0, acechador: 0, griton: 0, tanque: 0 } };
-      this.stats = { spawned: 0, killed: 0, hordes: 0, ambushes: 0 };
+      this.info = { living: 0, alerted: 0, chasers: 0, dormant: 0, chaseA: 0, counts: { normal: 0, acechador: 0, griton: 0, tanque: 0 } };
+      this.stats = { spawned: 0, killed: 0, hordes: 0, ambushes: 0, indoor: 0 };
       // rejilla espacial para separación (centrada en el jugador)
       this.hCell = 48; this.hCols = 64; this.hRows = 64;
       this.hHead = new Int32Array(this.hCols * this.hRows);
       this.hNext = new Int32Array(256);
       this._flankArr = [];
+      this.indoorT = 2;
+      this.hintMem = new Map();   // pistas de interior ya tiradas (clave -> {x, y})
     }
 
     list() { const g = this.game; return g.zombies || (g.zombies = []); }
@@ -195,13 +206,15 @@
       const pAlive = p.alive !== false;
 
       this._dayCheck(g.day || 1);
+      const fc = this.flow ? this.flow.computes : 0;
       if (this.flow && pAlive) this.flow.update(dt, w, p.x, p.y);
-      if (this.flowBig && pAlive && this._needBig) this.flowBig.update(dt, w, p.x, p.y);
+      // el campo grande nunca se recalcula en el mismo frame que el normal (reparte el pico)
+      if (this.flowBig && pAlive && this._needBig) { if (!this.flow || this.flow.computes === fc || !this.flowBig.valid) this.flowBig.update(dt, w, p.x, p.y); }
       else if (this.flowBig) this.flowBig.valid = false;
 
       // recuento del frame
       const info = this.info, counts = info.counts;
-      info.living = 0; info.alerted = 0; info.chasers = 0;
+      info.living = 0; info.alerted = 0; info.chasers = 0; info.dormant = 0;
       counts.normal = 0; counts.acechador = 0; counts.griton = 0; counts.tanque = 0;
       let tokens = 0, sx = 0, sy = 0, needBig = false;
       for (let i = 0; i < zs.length; i++) {
@@ -210,6 +223,7 @@
         info.living++;
         counts[z.type] = (counts[z.type] || 0) + 1;
         if (z.hasToken) tokens++;
+        if (z.state === 'dormant') info.dormant++;
         if (z.r >= BIG_R && z._pd < 700 && z.state !== 'fakeDead' && z.state !== 'ambush') needBig = true;
         if (z.alerted) {
           info.alerted++;
@@ -225,6 +239,7 @@
         this.learnAcc += dt;
         if (this.learnAcc >= 0.25) { this._learnTick(this.learnAcc, zs); this.learnAcc = 0; }
         this._spawnLogic(dt, info);
+        this._indoorLogic(dt, info);
         this._ambushLogic(dt, info);
       }
       this._pendingLogic(dt, info);
@@ -355,6 +370,7 @@
         if (!allowSafe && x * x + y * y < S * S) continue;
         if (cam && cam.inView && cam.inView(x, y, 50)) continue;
         if (w && w.isFree && !w.isFree(x, y, r + 2)) continue;
+        if (w && w.buildingAt && w.buildingAt(x, y)) continue; // los de interior los pone _indoorLogic
         return { x, y };
       }
       return null;
@@ -389,10 +405,11 @@
       this.target = this._targetPop();
       if (this.relaxT > 0) this.target = Math.round(this.target * RELAX_POP);
       const living = info.living;
-      if (living >= this.target) { this.spawnT = 0.8; return; }
+      const eff = living - Math.floor(info.dormant * INDOOR_WEIGHT); // los dormidos de interior cuentan menos
+      if (eff >= this.target) { this.spawnT = 0.8; return; }
       const st = this.stage;
       let n = st >= 3 ? ri(2, 4) : st === 2 ? ri(1, 3) : ri(1, 2);
-      n = Math.min(n, this.target - living, this._maxZ() - living, Math.floor(this.spawnBudget));
+      n = Math.min(n, this.target - eff, this._maxZ() - living, Math.floor(this.spawnBudget));
       if (n <= 0) { this.spawnT = 0.5; return; }
       this.spawnT = rr(1.0, 2.2);
       // dirección de aparición
@@ -421,6 +438,110 @@
           this.spawnBudget -= 1;
         }
       }
+    }
+
+    // ---------- interiores ----------
+    // Pistas de aparición solo de chunks ya generados (no fuerza generación síncrona)
+    _readyHints(x0, y0, x1, y1) {
+      const w = this.game.world;
+      if (!w.chunks || !w.key) return w.spawnHints(x0, y0, x1, y1);
+      const CH = (TM.Config && TM.Config.CHUNK) || 512;
+      const out = [];
+      const c0 = Math.floor(x0 / CH), c1 = Math.floor(x1 / CH), r0 = Math.floor(y0 / CH), r1 = Math.floor(y1 / CH);
+      for (let cy = r0; cy <= r1; cy++) {
+        for (let cx = c0; cx <= c1; cx++) {
+          const ch = w.chunks.get(w.key(cx, cy));
+          if (!ch || ch.state !== 2) continue;
+          const hs = w.spawnHints(Math.max(x0, ch.x0), Math.max(y0, ch.y0), Math.min(x1, ch.x0 + CH - 0.01), Math.min(y1, ch.y0 + CH - 0.01));
+          for (let i = 0; i < hs.length; i++) out.push(hs[i]);
+        }
+      }
+      return out;
+    }
+
+    // Zombies dormidos dentro de edificios (habitaciones, naves, "INFECTADOS DENTRO"), fuera de la vista
+    _indoorLogic(dt, info) {
+      this.indoorT -= dt;
+      if (this.indoorT > 0) return;
+      this.indoorT = INDOOR_SCAN;
+      const g = this.game, p = g.player, w = g.world, cam = g.camera;
+      if (!w || !w.spawnHints) return;
+      for (const [k, e] of this.hintMem) if (Math.hypot(e.x - p.x, e.y - p.y) > INDOOR_FORGET) this.hintMem.delete(k);
+      const maxZ = this._maxZ();
+      let budget = Math.min(8, maxZ - info.living, Math.round(maxZ * INDOOR_SHARE) - info.dormant);
+      if (budget <= 0) return;
+      const vw = cam ? cam.viewW : 800, vh = cam ? cam.viewH : 430;
+      const R = Math.max(vw, vh) / 2 + 420;
+      const hints = this._readyHints(p.x - R, p.y - R, p.x + R, p.y + R);
+      if (!hints.length) return;
+      const S = safeR() + 80;
+      const curB = w.curB;
+      for (let i = 0; i < hints.length && budget > 0; i++) {
+        const h = hints[i];
+        if (!h.indoor) continue;
+        const key = (h.buildingId || '?') + ':' + Math.round(h.x) + ':' + Math.round(h.y);
+        if (this.hintMem.has(key)) continue;
+        if (h.x * h.x + h.y * h.y < S * S) { this.hintMem.set(key, { x: h.x, y: h.y }); continue; }
+        // nunca a la vista ni demasiado cerca: se vuelve a intentar más tarde
+        if (cam && cam.inView && cam.inView(h.x, h.y, 90)) continue;
+        if (Math.hypot(h.x - p.x, h.y - p.y) < INDOOR_MIN_D) continue;
+        if (curB && curB.id === h.buildingId && w.lineOfSight && w.lineOfSight(p.x, p.y, h.x, h.y)) continue;
+        this.hintMem.set(key, { x: h.x, y: h.y });
+        budget -= this._fillHint(h, info, budget);
+      }
+    }
+
+    _fillHint(h, info, budget) {
+      const g = this.game, w = g.world;
+      const b = w.buildingAt ? w.buildingAt(h.x, h.y) : null;
+      if (!b) return 0;
+      const bt = h.buildingType || b.type;
+      const strong = !!STRONG_BT[bt];
+      const danger = Math.max(0, +h.danger || (w.dangerAt ? w.dangerAt(h.x, h.y) : 0));
+      // la pista "INFECTADOS DENTRO" llena el edificio (según su superficie); el resto de sus pistas, algo más
+      const infected = !!h.infected;
+      const m2 = (b.w * b.h) / (32 * 32);
+      let n;
+      if (infected) n = Math.min(12, ri(3, 5) + Math.min(this.stage - 1, 2) + Math.floor(m2 / 120));
+      else {
+        let chance = (0.28 + 0.12 * Math.min(danger, 3)) * (strong ? 1.6 : bt === 'house' || bt === 'farmhouse' ? 0.8 : 1);
+        if (b.infected) chance *= 1.5;
+        if (this.relaxT > 0) chance *= 0.6;
+        if (Math.random() > Math.min(0.9, chance)) return 0;
+        n = 1 + (Math.random() < 0.2 + 0.1 * Math.min(danger, 3) ? 1 : 0) + (strong ? ri(0, 2) : 0);
+      }
+      n = Math.min(n, budget);
+      const zDanger = danger + (strong ? 0.6 : 0) + (infected ? 0.3 : 0);
+      const rooms = b.det && b.det.rooms && b.det.rooms.length ? b.det.rooms : null;
+      const big = b.w * b.h > 600 * 600;
+      let made = 0;
+      for (let k = 0; k < n; k++) {
+        let type = this._pickType(info.counts);
+        if (type === 'tanque' && !big) type = 'normal';        // no cabría por las puertas
+        const r = type === 'tanque' ? 22 : 13;
+        // posición: alrededor de la pista; los infectados se reparten por las habitaciones
+        let x = h.x + rr(-28, 28), y = h.y + rr(-28, 28);
+        if (infected && rooms && k > 0) {
+          const rm = rooms[(Math.random() * rooms.length) | 0];
+          if (rm.w > r * 2 + 8 && rm.h > r * 2 + 8) { x = rr(rm.x + r + 4, rm.x + rm.w - r - 4); y = rr(rm.y + r + 4, rm.y + rm.h - r - 4); }
+        }
+        if (w.isFree && !w.isFree(x, y, r)) {
+          if (!w.findFree) continue;
+          const f = w.findFree(x, y, r, 64);
+          if (!w.isFree(f.x, f.y, r)) continue;
+          x = f.x; y = f.y;
+        }
+        const bb = w.buildingAt(x, y);
+        if (!bb || bb.id !== b.id) continue;                    // que no quede fuera de los muros
+        const z = this._makeZombie(type, x, y, { state: 'dormant', indoor: true, danger: zDanger });
+        if (!z) continue;
+        z.bId = b.id;
+        made++;
+        info.living++; info.dormant++;
+        info.counts[type] = (info.counts[type] || 0) + 1;
+        this.stats.indoor++;
+      }
+      return made;
     }
 
     // Elimina el no alertado más lejano fuera de pantalla para hacer sitio
@@ -701,20 +822,26 @@
     }
 
     // ---------- eventos ----------
+    // Ruido: 'shot' | 'shove' | 'scream' | 'footstep' | 'impact' | 'melee' | 'door' | 'door_bash' | 'chest' |
+    // 'chest_alarm' | 'explosion' | 'glass' | 'flare'. Entre dentro y fuera (o entre edificios) se amortigua.
     onNoise(x, y, radius, kind) {
-      const g = this.game, zs = this.list();
+      const g = this.game, zs = this.list(), w = g.world;
       if (!(radius > 0)) return;
+      const nb = w && w.buildingAt ? w.buildingAt(x, y) : null;
+      const nbId = nb ? nb.id : null;
+      const scream = kind === 'scream';
       for (let i = 0; i < zs.length; i++) {
         const z = zs[i];
         if (z.dead || z.remove) continue;
-        const h = radius * (z.s ? z.s.hearing : 1);
+        let h = radius * (z.s ? z.s.hearing : 1);
+        if (!scream && (z.bId || null) !== nbId) h *= MUFFLE;
         const dx = z.x - x, dy = z.y - y;
         const d2 = dx * dx + dy * dy;
         if (d2 > h * h) continue;
         z.hearNoise(x, y, kind, Math.sqrt(d2) / h, g);
-        if (kind === 'scream' && z.state !== 'fakeDead' && z.state !== 'ambush') z.homing = Math.max(z.homing || 0, 4);
+        if (scream && z.state !== 'fakeDead' && z.state !== 'ambush') z.homing = Math.max(z.homing || 0, 4);
       }
-      if (kind === 'shot' || kind === 'scream' || kind === 'impact') {
+      if (NOISE_AMBUSH[kind]) {
         for (const gp of this.groups) {
           if (!gp.active && Math.hypot(gp.x - x, gp.y - y) < radius * 0.4) this.activateGroup(gp);
         }
@@ -728,7 +855,7 @@
       for (let i = 0; i < zs.length; i++) {
         const z = zs[i];
         if (z === src || z.dead || z.remove || z.alerted) continue;
-        if (z.state !== 'wander' && z.state !== 'search' && z.state !== 'investigate') continue;
+        if (z.state !== 'wander' && z.state !== 'search' && z.state !== 'investigate' && z.state !== 'dormant') continue;
         const dx = z.x - src.x, dy = z.y - src.y;
         if (dx * dx + dy * dy > r2) continue;
         z.alertTo(p.x, p.y, true);
@@ -906,7 +1033,8 @@
       const pc = (v) => Math.round(v * 100) + '%';
       const fs = prof.fleeSector >= 0 ? SECTORS[prof.fleeSector] : '-';
       return [
-        'Zombis ' + info.living + '/' + this._maxZ() + ' (obj ' + this.target + ') alerta ' + info.alerted +
+        'Zombis ' + info.living + '/' + this._maxZ() + ' (obj ' + this.target + ') alerta ' + info.alerted + ' · dormidos ' + info.dormant +
+          ' (int ' + this.stats.indoor + ')' +
           ' · emb ' + amb + ' · fingen ' + fake + ' · cadáveres ' + corpses,
         'Etapa ' + st.stage + ': ' + st.name + ' (día ' + (this.game.day || 1) + ') · atacan ' + this.tokensUsed + '/' + this.maxAttackers() +
           ' · hordas ' + this.stats.hordes + ' · emboscadas ' + this.stats.ambushes,

@@ -11,13 +11,15 @@
     { stage: 4, from: 31, name: 'Tienden trampas',     banner: 'Ahora tienden trampas' },
   ];
 
-  // Valores base (día 1, peligro 0). walk = velocidad de persecución típica en etapa 1,
-  // walk2 = desde la etapa 2; run = corredores (solo 'normal').
+  // Valores base (día 1, peligro 0), en unidades de mundo (32 u = 1 m). walk = velocidad de persecución típica en
+  // etapa 1, walk2 = desde la etapa 2; run = corredores (solo 'normal').
+  // Caminante ≈ 1,25 m/s (1,45 desde la etapa 2), corredor ≈ 4,4 m/s, acechador 3,4–4,8 m/s, tanque ≈ 1,25–1,55 m/s.
+  // El jugador camina a 150 (4,7 m/s) y corre a 208 (6,5 m/s).
   const BASE = {
-    normal:    { hp: 55,  r: 11,   walk: 55,  walk2: 55,  run: 140, dmg: 9,  cd: 1.15, reach: 13, sight: 1.0,  hearing: 1.0,  windup: 0.3 },
+    normal:    { hp: 55,  r: 11,   walk: 40,  walk2: 46,  run: 140, dmg: 9,  cd: 1.15, reach: 13, sight: 1.0,  hearing: 1.0,  windup: 0.3 },
     acechador: { hp: 42,  r: 9.5,  walk: 108, walk2: 155, run: 0,   dmg: 8,  cd: 1.0,  reach: 12, sight: 1.15, hearing: 1.25, windup: 0.3 },
-    griton:    { hp: 50,  r: 12.5, walk: 54,  walk2: 66,  run: 0,   dmg: 5,  cd: 1.3,  reach: 12, sight: 1.1,  hearing: 1.0,  windup: 0.32 },
-    tanque:    { hp: 340, r: 20,   walk: 41,  walk2: 52,  run: 0,   dmg: 20, cd: 1.6,  reach: 16, sight: 0.9,  hearing: 0.8,  windup: 0.45 },
+    griton:    { hp: 50,  r: 12.5, walk: 44,  walk2: 54,  run: 0,   dmg: 5,  cd: 1.3,  reach: 12, sight: 1.1,  hearing: 1.0,  windup: 0.32 },
+    tanque:    { hp: 340, r: 20,   walk: 40,  walk2: 50,  run: 0,   dmg: 20, cd: 1.6,  reach: 16, sight: 0.9,  hearing: 0.8,  windup: 0.45 },
   };
 
   // ---- Ajustes de equilibrio ----
@@ -28,7 +30,7 @@
   const SPEED_LOG = 0.08;         // velocidad: crecimiento logarítmico
   const DMG_LOG = 0.28;           // daño: crecimiento logarítmico (día 30 ≈ ×1.43, día 60 ≈ ×1.60)
   // velocidad máxima de persecución por tipo (el jugador camina a 150 y corre a 208)
-  const SPEED_CAP = { normal: 78, runner: 185, acechador: 195, griton: 90, tanque: 70 };
+  const SPEED_CAP = { normal: 64, runner: 185, acechador: 195, griton: 74, tanque: 66 };
   const RUN_CHANCE = [0, 0, 0.35, 0.45, 0.55]; // por etapa (normales corredores)
   const DODGE = [0, 0, 0.4, 0.5, 0.55];        // probabilidad de esquivar al ser apuntado
   const COVER = [0, 0, 0.3, 0.4, 0.45];        // probabilidad de buscar cobertura

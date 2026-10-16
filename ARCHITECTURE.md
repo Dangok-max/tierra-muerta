@@ -132,18 +132,57 @@ Cada zombie en `game.zombies` tiene:
 - `shove(dirX, dirY, force)` — empujón del jugador (tambaleo).
 - `draw(ctx, t)` — dibuja en coordenadas de mundo (la cámara ya está aplicada).
 - `drawGlow(ctx, t)` — opcional; se dibuja DESPUÉS de la capa de oscuridad (ojos brillantes).
+- `alerted` (bool) — false mientras no ha detectado al jugador (lo vio, lo golpearon, un grito o un compañero lo
+  avisaron). Oír un ruido NO lo alerta: solo va a investigar. `combat.js` usa `!z.alerted && !z.fakeDead` para el
+  golpe de sigilo (cuchillo ×3). Sin alerta solo ve en un cono frontal de ~100° de semiángulo (por detrás nota al
+  jugador a ≤ 40 u); las paredes, puertas cerradas y muebles altos tapan la vista (`world.lineOfSight`).
+- `state` — además de los de la Fase 1, `'dormant'`: quieto/adormilado (aparecidos dentro de edificios); ve ×0,55 y
+  solo oye ruidos dentro del 60 % de su radio; al oír algo pasa a `'investigate'`, al ver al jugador lo persigue.
+- `indoor` (apareció en un interior), `bId` (id del edificio en el que está, cacheado ~1 s), `bashDoor` (puerta cerrada
+  que está golpeando o null).
 
 ## Director (`game.director`, director.js)
 
 - `new TM.Director(game)`.
 - `update(dt)` — aparece/elimina zombies, actualiza TODOS los zombies, separación entre
   ellos, evolución por día y aprendizaje.
-- `onNoise(x, y, radius, kind)` — 'shot' | 'shove' | 'scream' | 'footstep' | 'impact'.
+- `onNoise(x, y, radius, kind)` — 'shot' | 'shove' | 'scream' | 'footstep' | 'impact' | 'melee' | 'door' |
+  'door_bash' | 'chest' | 'chest_alarm' | 'explosion' | 'glass' | 'flare'. El radio se multiplica por el oído del
+  zombie y por 0,6 si el ruido y el zombie no están en el mismo edificio (dentro↔fuera). Quien lo oye va a investigar
+  el punto (con prisa si está cerca de un ruido fuerte); los que ya persiguen al jugador no se distraen, salvo con
+  una bengala ('flare'). 'shot', 'scream', 'impact', 'explosion' y 'chest_alarm' activan emboscadas cercanas.
 - `onPlayerAttack(kind)` — cada disparo/empujón del jugador (para aprender).
 - `onKill(zombie, kind)`.
 - `stageInfo()` → `{ stage, name }`.
 - `serialize()` / `deserialize(data)` — estado de aprendizaje para el guardado.
 - `debugText()` → array de strings para el overlay de depuración.
+
+### IA y mundo v2 (zombie.js, director.js, flowfield.js, evolution.js)
+- Escala: caminante ≈ 1,25 m/s (40 u/s; 46 desde la etapa 2, tope 64), corredor ≈ 4,4 m/s, acechador 3,4–4,8 m/s,
+  tanque ≈ 1,25–1,55 m/s; de noche corredores y acechadores +15 %, el resto +8 %. Visión: ~19 m de día (600 u),
+  ~6 m de noche cerrada (190; acechador 330), con la linterna encendida ~12 m y ~24 m si les apunta; dentro de
+  edificios cuenta como oscuridad ≥ `WORLD.INDOOR_DARK`. Pasos: 50 + 230·`player.noise` u (la mitad a través de muros).
+- Flow field: celdas 0 libre, 1 bloqueada, 2 puerta cerrada (coste extra ≈ 6 m de rodeo; sin diagonales por puertas).
+  Hay un segundo campo para los grandes (r ≥ 16: tanque) con obstáculos inflados 16 u y `minDoor = 44`: las puertas
+  (abiertas, cerradas o rotas) más estrechas que eso se bloquean, salvo las dobles. `flow.doorAt(x, y)`.
+- Puertas: un zombie que va hacia un objetivo (chase/investigate/stalk/keepaway/cover), frenado y pegado a una puerta
+  cerrada en la dirección en que avanza, se para y la golpea cada 0,9–1,4 s: `world.damageDoor(id, daño)` (tanque ×3,2),
+  sonido 'door_bash' (o 'door_break' en el golpe que la rompe) y `game.emitNoise(cx, cy, 400, 'door_bash')`. No golpea
+  al jugador a través de paredes ni puertas cerradas (`world.raycast`). El tanque no intenta entrar por puertas
+  sencillas: si no tiene camino, espera junto al muro y lo aporrea (o la puerta pegada); su embestida contra una puerta
+  cerrada la revienta.
+- Interiores: el director recorre cada 1,3 s las pistas `world.spawnHints` de chunks ya generados (lee `world.chunks` y
+  `world.key` para no forzar generación síncrona) en un radio de ~media pantalla + 13 m. Cada pista de interior se tira
+  una vez (se olvida cuando el jugador se aleja > 1900 u): nunca a la vista, a < 260 u, en el radio seguro ni con línea
+  de visión si el jugador está en ese edificio. Hospital, comisaría, militar y búnker: más probabilidad, más zombies y
+  más peligro (+0,6). "INFECTADOS DENTRO": un grupo de 3–12 según la superficie, repartido por las habitaciones. Sin
+  tanques en edificios pequeños. Aparecen `'dormant'`; como mucho el 45 % de `maxZombies` y cuentan un 60 % para la
+  población objetivo de exterior. Los de exterior ya no aparecen dentro de edificios.
+- Dibujo: el renderer no mete en la lista de dibujo (cuerpo ni `drawGlow`) a los zombies con `world.roofCovers(x, y)`.
+- `takeDamage(…, 'fire')`: sin sangre ni empuje; destello y 'hit_flesh' suave como mucho cada 0,8 s.
+  'explosion': empuje fuerte (260; el tanque ×0,12) y deja de golpear puertas.
+- Caché de sprites: tope 12/16/24 MB (low/med/high); al llenarse expulsa los menos usados (LRU) hasta el 80 %.
+  `TM.Zombie.spriteLimitMB` (> 0) fuerza un tope para pruebas; `TM.Zombie.spriteStats()` incluye `evicted`.
 
 ## Orden de un frame (main.js)
 
