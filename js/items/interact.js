@@ -199,6 +199,7 @@
       const g = this.game, p = g.player, W = this.world;
       call(W, 'markChestOpened', c.id);
       c.opened = true;
+      if (p.skills) p.skills.gain('survival', 1.5);
       const rng = new U.RNG(((c.id && String(c.id).split('').reduce((a, ch) => a * 31 + ch.charCodeAt(0), 7)) || 1) ^ (g.seed | 0));
       const stacks = TM.Loot.roll(c, rng);
       if (TM.Audio) TM.Audio.play('chest_open', c.x, c.y);

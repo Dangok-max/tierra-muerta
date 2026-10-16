@@ -71,10 +71,12 @@
   const SIGHT_NIGHT_STALKER = 330;
   const SIGHT_BEAM = 760;         // la linterna apuntándoles los delata a ~24 m
   const SIGHT_LIGHT = 380;        // linterna encendida pero no hacia ellos (~12 m)
-  const REAR_FEEL = 40;           // sin alerta: por detrás solo notan al jugador a ~1,25 m
+  const REAR_FEEL = 24;           // sin alerta: por detrás solo notan al jugador si los toca (sin "olfato")
   const FOV_HALF = 1.75;          // semiángulo de visión sin alerta (~100°)
   const DORMANT_SIGHT = 0.55;     // dormidos/quietos: ven peor
   const DORMANT_HEAR = 0.6;       // y oyen peor
+  const AWARE_NEAR = 80;          // a menos de ~2,5 m (y viéndolo) lo detectan al instante
+  const FLOW_NEAR = 96;           // objetivo a menos de 3 m del jugador: vale el campo de flujo del jugador
   // ruido: por debajo de esta fracción del radio, van con prisa a investigar
   const NOISE_URGENT = { shot: 0.75, explosion: 0.9, chest_alarm: 0.7, glass: 0.55, door_bash: 0.45, shove: 1, impact: 0.35, flare: 0.3 };
   const BASH_CD = [0.9, 1.4];     // s entre golpes a una puerta
@@ -244,6 +246,7 @@
       this.state = 'wander'; this.stateT = 0;
       this.alerted = false;
       this.seesPlayer = false;
+      this.aware = 0;                    // 0..1: sospecha antes de detectarlo (se llena viéndolo; a 1 lo detecta)
       this.unseenT = 99;                 // segundos desde que vio al jugador
       this.lkX = x; this.lkY = y;        // último punto conocido
       this.urgent = false;
@@ -445,7 +448,11 @@
       if (kind === 'door_bash' && this.bashDoor) return;         // su propio golpe (o el de su grupo)
       if (st === 'dormant' && frac > DORMANT_HEAR) return;      // adormilado: solo despierta con ruido cercano
       if (this.seesPlayer) return;
-      if (this.alerted && this.unseenT < LOSE_TRACK && kind !== 'flare') return; // lo está siguiendo: no se distrae
+      if (this.alerted && this.unseenT < LOSE_TRACK && kind !== 'flare') {
+        // lo está siguiendo: no se distrae, pero sus pasos le dicen por dónde va
+        if (kind === 'footstep' && frac < 0.8) { this.lkX = x; this.lkY = y; this.unseenT = Math.min(this.unseenT, 0.5); }
+        return;
+      }
       this.lkX = x; this.lkY = y; // cada uno investiga alrededor con su propio desplazamiento (invOX/invOY)
       if (PASSIVE[st]) {
         this.urgent = frac < (NOISE_URGENT[kind] || 0);
@@ -529,22 +536,34 @@
       if (!pAlive) { this._thinkFeed(p, d); return; }
 
       // percepción
-      this.seesPlayer = this._canSee(g, p, d);
-      if (this.seesPlayer) {
+      const sees = this._canSee(g, p, d);
+      if (sees && this.alerted) {
+        this.seesPlayer = true; this.aware = 1;
         this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
-        if (!this.alerted) this._onSpot(g, dir);
-      } else if ((p.noise || 0) > 0.01 && d < (30 + 230 * p.noise) * this.s.hearing * (this.state === 'dormant' ? DORMANT_HEAR : 1)) {
-        // oye pasos cercanos (sin pasar por paredes gruesas: si hay muro entre medias, la mitad)
-        const w = g.world;
-        if (d < (15 + 115 * (p.noise || 0)) * this.s.hearing || !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y)) {
-          this.lkX = p.x; this.lkY = p.y;
-          if (this.alerted) this.unseenT = Math.min(this.unseenT, 0.5);
-          else if (this.state === 'wander' || this.state === 'search' || this.state === 'dormant') {
-            this.urgent = false; this.setState('investigate');
-            this.angle = Math.atan2(dy, dx) + rr(-0.4, 0.4);
+      } else if (sees) {
+        // sin alerta: la sospecha se llena más rápido cuanto más cerca (a ≤ 2,5 m, al instante;
+        // en el límite de su vista, ~2 s). Si sospecha, se gira y se acerca a mirar sin prisa.
+        const k = d / (this._sightR || SIGHT_DAY);
+        const rate = d < AWARE_NEAR ? 99 : 1 / (0.3 + 1.7 * k);
+        this.aware = Math.min(1, this.aware + rate * this.lastThink * (this.state === 'dormant' ? 0.6 : 1));
+        if (this.aware >= 1) {
+          this.seesPlayer = true;
+          this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
+          this._onSpot(g, dir);
+        } else {
+          this.seesPlayer = false;
+          if (this.aware > 0.35 && PASSIVE[this.state]) {
+            this.lkX = p.x; this.lkY = p.y;
+            if (this.state !== 'investigate') { this.urgent = false; this.setState('investigate'); }
+            this.angle = Math.atan2(dy, dx);
           }
         }
+      } else {
+        this.seesPlayer = false;
+        if (this.aware > 0 && !this.alerted) this.aware = Math.max(0, this.aware - 0.3 * this.lastThink);
       }
+      // Ya no hay "oído por proximidad": los pasos del jugador llegan como ruido real (emitNoise 'footstep',
+      // radio según camine en sigilo, normal o corra; ver player.js) y se tratan en hearNoise.
       // guiados por el grito: conocen la posición del jugador un rato
       if (this.homing > 0) {
         this.homing -= this.lastThink;
@@ -587,12 +606,14 @@
         range = Math.max(range, lerp(SIGHT_DAY, inBeam ? SIGHT_BEAM : SIGHT_LIGHT, dark));
       }
       range *= (1 - 0.5 * (wx.fog || 0)) * (1 - 0.15 * (wx.rain || 0)) * this.s.sight;
+      range *= p.sightMul || 1;  // agachado/quieto y la habilidad Sigilo
       if (this.state === 'dormant') range *= DORMANT_SIGHT;
       // sin alerta: campo de visión frontal; por detrás solo lo notan pegado
       if (!this.alerted && d > REAR_FEEL) {
         const a2 = Math.atan2(p.y - this.y, p.x - this.x);
         if (Math.abs(angDiff(this.angle, a2)) > FOV_HALF) return false;
       }
+      this._sightR = range;
       if (d > range) return false;
       // paredes, puertas cerradas y muebles altos tapan la vista
       return !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y);
@@ -624,7 +645,7 @@
       if (this.alerted) {
         if (knows) return false;
         if (st === 'search') {
-          if (this.stateT > this.searchDur) { this.alerted = false; this.flankAngle = null; this.setState(this._calmState()); }
+          if (this.stateT > this.searchDur) { this.alerted = false; this.aware = 0.3; this.flankAngle = null; this.setState(this._calmState()); }
           return true;
         }
         if (st !== 'investigate') { this.urgent = true; this.setState('investigate'); }
@@ -648,9 +669,13 @@
         if (!this.idle && Math.random() < 0.35) { this.idle = true; this.wanderDur = rr(1, 3.5); }
         else {
           this.idle = false; this.wanderDur = rr(2, 5);
-          const bias = 0.35 + 0.35 * (g.darkness || 0); // de noche "huelen" al jugador
-          if (d < 1400 && Math.random() < bias) this.wanderA = Math.atan2(p.y - this.y, p.x - this.x) + rr(-1.1, 1.1);
-          else this.wanderA = Math.random() * TAU;
+          // sin "olfato": deambulan al azar, con cierta querencia hacia el último ruido fuerte (disparos,
+          // explosiones...) que hubo por la zona, no hacia el jugador
+          const L = g.director && g.director.lastLoud;
+          const age = L ? (g.director.clock - L.t) : 1e9;
+          if (L && age < 90 && Math.random() < 0.45 * (1 - age / 90) && Math.hypot(L.x - this.x, L.y - this.y) < 1500) {
+            this.wanderA = Math.atan2(L.y - this.y, L.x - this.x) + rr(-0.9, 0.9);
+          } else this.wanderA = Math.random() * TAU;
         }
       }
       // sin alerta no entran al campamento
@@ -1090,6 +1115,20 @@
       const L = Math.sqrt(ex * ex + ey * ey);
       if (L < 1) { this._nx = 0; this._ny = 0; return; }
       if (allowFlow && dir && (!this.navDirect || this.forceFlowT > 0)) {
+        // El campo de flujo principal lleva HACIA EL JUGADOR: solo sirve si el objetivo está junto a él.
+        // Para otro punto (un ruido que investiga, el último sitio donde lo vio) se usa un campo local
+        // centrado en ese punto (director.pointFlow); si no lo hay, línea recta y el sistema de atascos rodea.
+        const pl = dir.game && dir.game.player;
+        const toPoint = this.state === 'investigate' || (this.state === 'chase' && !this.seesPlayer && this.unseenT >= LOSE_TRACK);
+        if (pl && toPoint) {
+          const ox = tx - pl.x, oy = ty - pl.y;
+          if (ox * ox + oy * oy > FLOW_NEAR * FLOW_NEAR) {
+            const pf = this.r < 16 && dir.pointFlow ? dir.pointFlow(this.lkX, this.lkY) : null;
+            if (pf && pf.dirAt(this.x, this.y, TMP)) { this._nx = TMP.x; this._ny = TMP.y; return; }
+            this._nx = ex / L; this._ny = ey / L;
+            return;
+          }
+        }
         // los grandes usan el campo con obstáculos más inflados (no intentan huecos estrechos)
         const big = this.r >= 16 && dir.flowBig && dir.flowBig.valid;
         if (big) {

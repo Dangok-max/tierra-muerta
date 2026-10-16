@@ -267,6 +267,8 @@
       const d = Math.hypot(mx, my);
       if (d > 0) { mx /= d; my /= d; mmag = 1; }
       sprint = mmag > 0 && !!(k.ShiftLeft || k.ShiftRight);
+      // C (mantener): caminar en sigilo, despacio y en silencio (Ctrl no: Ctrl+W cierra la pestaña)
+      if (mmag > 0 && !sprint && k.KeyC) mmag = 0.5;
     }
     this.move.x = mx; this.move.y = my; this.move.mag = mmag; this.move.sprint = sprint;
 

@@ -20,7 +20,14 @@
     { id: 'pistol_sil', out: ['pistol_sil', 1], need: [['pistol', 1], ['botella', 1], ['cinta', 2], ['tela', 2]], tool: 'sierra', bp: 'mejoras', keep: 'pistol' },
     { id: 'pipebomb', out: ['pipebomb', 1], need: [['chatarra', 2], ['polvora', 5], ['cinta', 1], ['clavos', 6]], tool: 'llave', bp: 'explosivos' },
     { id: 'flare', out: ['flare', 2], need: [['polvora', 2], ['chatarra', 1], ['tela', 1]], bp: 'explosivos' },
+    // recetas que se aprenden subiendo la habilidad Supervivencia (skill: [habilidad, nivel])
+    { id: 'venda_lote', out: ['venda', 2], need: [['tela', 4]], skill: ['survival', 2], label: 'Vendas (lote)' },
+    { id: 'botiquin_campo', out: ['botiquin', 1], need: [['venda', 2], ['alcohol', 1], ['tela', 2]], skill: ['survival', 4], label: 'Botiquín de campaña' },
+    { id: 'flare_sup', out: ['flare', 1], need: [['polvora', 2], ['chatarra', 1], ['tela', 1]], skill: ['survival', 6], label: 'Bengala improvisada' },
+    { id: 'molotov_sup', out: ['molotov', 1], need: [['botella', 1], ['alcohol', 1], ['tela', 1]], skill: ['survival', 8], label: 'Molotov sin mechero' },
   ];
+  const SKILL_NAMES = { survival: 'Supervivencia' };
+  function skillLv(id) { const g = TM.game, p = g && g.player; return p && p.skills ? p.skills.level(id) : 0; }
 
   const BP_NAMES = { municion: 'Plano: munición casera', explosivos: 'Plano: explosivos', mejoras: 'Plano: mejoras de armas', refugio: 'Plano: refugio' };
 
@@ -40,13 +47,14 @@
   }
 
   const Crafting = {
-    RECIPES, BP_NAMES,
+    RECIPES, BP_NAMES, SKILL_NAMES,
 
     status(inv, r) {
-      const locked = !!(r.bp && !inv.known[r.bp]);
+      const skLocked = !!(r.skill && skillLv(r.skill[0]) < r.skill[1]);
+      const locked = !!(r.bp && !inv.known[r.bp]) || skLocked;
       const miss = missingOf(inv, r.need);
       const toolOk = !r.tool || inv.has(r.tool);
-      return { locked, miss, toolOk, ok: !locked && !miss.length && toolOk };
+      return { locked, skLocked, miss, toolOk, ok: !locked && !miss.length && toolOk };
     },
 
     // Lista para la interfaz: recetas normales + reparaciones de lo que esté gastado
@@ -68,6 +76,7 @@
     // Fabrica. Devuelve { ok, text, stack? }.
     craft(inv, r) {
       const st = this.status(inv, r);
+      if (st.skLocked) return { ok: false, text: `Necesitas ${SKILL_NAMES[r.skill[0]] || r.skill[0]} ${r.skill[1]}` };
       if (st.locked) return { ok: false, text: 'Necesitas el ' + BP_NAMES[r.bp] };
       if (!st.toolOk) return { ok: false, text: 'Necesitas: ' + TM.Items.name(r.tool) };
       if (st.miss.length) return { ok: false, text: 'Te falta material' };
@@ -110,6 +119,8 @@
         }
       }
       const left = inv.add(res);
+      const pl = TM.game && TM.game.player;
+      if (pl && pl.skills) pl.skills.gain('survival', 4);
       if (wasEquipped) { const ns = inv.slots[inv.slots.length - 1]; if (ns && ns.id === res.id) inv.equip(ns); }
       return { ok: true, text: `Fabricado: ${TM.Items.label(res)}`, stack: res, leftover: left, toolBroke: res.toolBroke };
     },

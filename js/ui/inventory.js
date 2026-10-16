@@ -32,6 +32,7 @@
         ' <div class="inv-head">' +
         '  <button class="inv-tab on" data-tab="bag">MOCHILA</button>' +
         '  <button class="inv-tab" data-tab="craft">FABRICAR</button>' +
+        '  <button class="inv-tab" data-tab="skills">HABILIDADES</button>' +
         '  <div class="inv-weight"><div class="inv-wbar"><i></i></div><span class="inv-wtxt"></span></div>' +
         '  <button class="inv-close" aria-label="Cerrar">✕</button>' +
         ' </div>' +
@@ -137,7 +138,7 @@
       this.$wbar.style.background = k > 1 ? '#c8502e' : k > 0.85 ? '#c8a040' : '#7ea456';
       this.$wtxt.textContent = `${kg(w)} / ${max} kg` + (k > 1 ? (inv.canSprint() ? ' · LENTO' : ' · NO CORRES') : '');
       this.$wtxt.classList.toggle('over', k > 1);
-      if (this.tab === 'bag') this.renderBag(); else this.renderCraft();
+      if (this.tab === 'bag') this.renderBag(); else if (this.tab === 'skills') this.renderSkills(); else this.renderCraft();
       this.lastVersion = inv.version;
     },
 
@@ -223,6 +224,50 @@
       return h;
     },
 
+    // ---------- habilidades (suben con el uso, 0..10) ----------
+    renderSkills() {
+      const p = this.game.player, sk = p && p.skills;
+      this.$list.className = 'inv-list rows sk-list';
+      if (!sk) { this.$list.innerHTML = ''; this.$detail.innerHTML = ''; return; }
+      const L = TM.Skills.LIST;
+      if (!this.selSkill || !TM.Skills.def(this.selSkill)) this.selSkill = L[0].id;
+      let h = '';
+      for (const def of L) {
+        const lv = sk.level(def.id), k = sk.progress(def.id);
+        const pips = Array.from({ length: TM.Skills.MAX }, (_, i) => `<i class="${i < lv ? 'on' : ''}"></i>`).join('');
+        h += `<button class="sk-row${this.selSkill === def.id ? ' sel' : ''}${sk.flash[def.id] ? ' up' : ''}" data-sk="${def.id}" style="--skc:${def.color}">` +
+          `<span class="sk-name">${esc(def.name)}</span><span class="sk-lv">${lv}</span>` +
+          `<span class="sk-pips">${pips}</span><span class="sk-xp"><i style="width:${Math.round(k * 100)}%"></i></span></button>`;
+      }
+      this.$list.innerHTML = h;
+      this.$detail.innerHTML = this.skillHTML(this.selSkill, sk);
+    },
+
+    skillHTML(id, sk) {
+      const def = TM.Skills.def(id), lv = sk.level(id), max = TM.Skills.MAX;
+      const pc = (v) => Math.round(v * 100) + ' %';
+      const fx = {
+        aim: [`Dispersión −${pc(1 - sk.spreadMul())}`, `Recarga −${pc(1 - sk.reloadMul())}`, `Crítico +${pc(sk.critAdd())}`],
+        melee: [`Daño +${pc(sk.meleeDmgMul() - 1)}`, `Estamina por golpe −${pc(1 - sk.meleeStamMul())}`, `Golpes ${pc(1 - sk.meleeRateMul())} más rápidos`],
+        stealth: [`Ruido al correr −${pc(1 - sk.noiseMul())}`, `Te ven ${pc(1 - sk.sightMul())} más cerca`, `Golpe por la espalda +${sk.stealthBonus().toFixed(1)}×`],
+        fitness: [`Estamina máxima ${sk.maxStamina()}`, `Velocidad al correr +${pc(sk.sprintMul() - 1)}`, `Gasto al correr −${pc(1 - sk.drainMul())}`],
+        survival: [`Medicinas curan +${pc(sk.healMul() - 1)}`, `Comida y agua +${pc(sk.foodMul() - 1)}`, `Hambre y sed −${pc(1 - sk.needsMul())}`],
+      }[id] || [];
+      let h = `<div class="d-name" style="color:${def.color}">${esc(def.name)} · nivel ${lv}${lv >= max ? ' (máximo)' : ''}</div>`;
+      h += `<div class="d-desc">${esc(def.desc)}</div>`;
+      if (lv < max) {
+        const need = TM.Skills.xpNeed(lv);
+        h += `<div class="st-row"><span>Exp.</span><div class="st-bar"><i style="width:${Math.round(sk.progress(id) * 100)}%;background:${def.color}"></i></div><b>${Math.floor(sk.xp[id])}/${need}</b></div>`;
+      }
+      h += `<div class="d-stats">${fx.map(esc).join('<br>')}</div>`;
+      if (id === 'survival') {
+        const rs = TM.Crafting.RECIPES.filter((r) => r.skill && r.skill[0] === 'survival');
+        h += `<div class="d-stats">Recetas: ${rs.map((r) => `<span class="${lv >= r.skill[1] ? 'sk-ok' : 'sk-no'}">${esc(r.label)} (${r.skill[1]})</span>`).join(', ')}</div>`;
+      }
+      h += '<div class="d-hint">Las habilidades suben solas con el uso. Mientras ellos evolucionan cada día, tú también.</div>';
+      return h;
+    },
+
     renderCraft() {
       const inv = this.inv;
       this.$list.className = 'inv-list rows';
@@ -232,22 +277,22 @@
       list.forEach((e, i) => {
         const r = e.recipe, out = r.out;
         const d = DB()[out[0]];
-        const name = r.repair ? `Reparar ${d.name.toLowerCase()} (${Math.round(r.target.dur * 100)} %)` : d.name + (out[1] > 1 ? ' ×' + out[1] : '');
+        const name = r.repair ? `Reparar ${d.name.toLowerCase()} (${Math.round(r.target.dur * 100)} %)` : (r.label || d.name) + (out[1] > 1 ? ' ×' + out[1] : '');
         const cls = e.st.ok ? 'ok' : e.st.locked ? 'locked' : 'miss';
         const sel = this.selRecipe && (this.selRecipe === r || (r.repair && this.selRecipe.repair && this.selRecipe.target === r.target)) ? ' sel' : '';
         h += `<button class="cr-row ${cls}${sel}" data-i="${i}"><img src="${TM.Items.iconURL(out[0])}" alt=""><span class="cr-name">${esc(name)}</span>` +
-          `<span class="cr-st">${e.st.ok ? 'LISTO' : e.st.locked ? 'PLANO' : 'FALTA'}</span></button>`;
+          `<span class="cr-st">${e.st.ok ? 'LISTO' : e.st.skLocked ? 'NIVEL ' + r.skill[1] : e.st.locked ? 'PLANO' : 'FALTA'}</span></button>`;
       });
       this.$list.innerHTML = h;
       const cur = this.selRecipe && list.find((e) => e.recipe === this.selRecipe || (e.recipe.repair && this.selRecipe.repair && e.recipe.target === this.selRecipe.target));
       if (cur) { this.selRecipe = cur.recipe; this.$detail.innerHTML = this.recipeHTML(cur); }
-      else { this.selRecipe = null; this.$detail.innerHTML = '<div class="d-title">Fabricar</div><div class="d-hint">Elige una receta. Las marcadas con PLANO se aprenden leyendo planos que encuentres en escuelas, ferreterías, comisarías y bases militares.</div>'; }
+      else { this.selRecipe = null; this.$detail.innerHTML = '<div class="d-title">Fabricar</div><div class="d-hint">Elige una receta. Las marcadas con PLANO se aprenden leyendo planos que encuentres en escuelas, ferreterías, comisarías y bases militares; las de NIVEL, subiendo Supervivencia.</div>'; }
     },
 
     recipeHTML(e) {
       const r = e.recipe, inv = this.inv;
       const d = DB()[r.out[0]];
-      const title = r.repair ? 'Reparar: ' + d.name : d.name + (r.out[1] > 1 ? ' ×' + r.out[1] : '');
+      const title = r.repair ? 'Reparar: ' + d.name : (r.label || d.name) + (r.out[1] > 1 ? ' ×' + r.out[1] : '');
       let h = `<div class="d-head"><img src="${TM.Items.iconURL(d.id)}" alt=""><div><div class="d-name">${esc(title)}</div>` +
         `<div class="d-sub" style="color:${TM.Items.TIER_COLORS[d.tier]}">${TM.Items.CAT_NAMES[d.cat]}</div></div></div>`;
       if (!r.repair) h += `<div class="d-desc">${esc(d.desc)}</div>`;
@@ -259,6 +304,7 @@
       }
       if (r.tool) h += `<div class="need ${inv.has(r.tool) ? 'ok' : 'no'}"><img src="${TM.Items.iconURL(r.tool)}" alt=""><span>Herramienta: ${esc(TM.Items.name(r.tool))}</span><b>${inv.has(r.tool) ? '✓' : '✗'}</b></div>`;
       if (r.bp && !inv.known[r.bp]) h += `<div class="need no lock"><span>Requiere el ${esc(TM.Crafting.BP_NAMES[r.bp])}</span></div>`;
+      if (e.st.skLocked) h += `<div class="need no lock"><span>Requiere ${esc(TM.Crafting.SKILL_NAMES[r.skill[0]] || r.skill[0])} nivel ${r.skill[1]}</span></div>`;
       h += '</div>';
       h += `<div class="d-actions"><button class="ibtn primary big" data-a="craft"${e.st.ok ? '' : ' disabled'}>${r.repair ? 'REPARAR' : 'FABRICAR'}</button></div>`;
       return h;
@@ -273,6 +319,11 @@
         this.sel = this.sel === s ? null : s;
         this.click();
         this.renderBag();
+      } else if (this.tab === 'skills') {
+        const b = e.target.closest('.sk-row'); if (!b) return;
+        this.selSkill = b.dataset.sk;
+        this.click();
+        this.renderSkills();
       } else {
         const b = e.target.closest('.cr-row'); if (!b) return;
         const ent = this._craftList[+b.dataset.i];

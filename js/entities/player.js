@@ -20,6 +20,95 @@
   const REGEN_FED = 0.1;      // vida/s bien alimentado (antes 1,5)
   const REGEN_CAMP = 0.8;     // vida/s junto a la fogata
 
+  // ---------- Ruido de pasos (u; 32 u = 1 m). Los zombies solo oyen lo que se emite con game.emitNoise ----------
+  const SNEAK_MAG = 0.6;      // joystick desplazado ≤ 60 % (≤ 90 u/s): pasos silenciosos
+  const WALK_NOISE = 48;      // caminar normal: ~1,5 m
+  const RUN_NOISE = 330;      // correr: ~10 m (la habilidad Sigilo lo reduce hasta un 45 %)
+
+  // ---------- Habilidades (suben con el uso, niveles 0..10) ----------
+  const SKILLS = [
+    { id: 'aim', name: 'Puntería', color: '#e8c070', desc: 'Sube disparando y acertando. Menos dispersión, recarga más rápida y más críticos.' },
+    { id: 'melee', name: 'Cuerpo a cuerpo', color: '#e08a6a', desc: 'Sube golpeando. Más daño, menos estamina por golpe y golpes más rápidos.' },
+    { id: 'stealth', name: 'Sigilo', color: '#9ad0a0', desc: 'Sube moviéndote cerca de ellos sin que te vean y matando por la espalda. Menos ruido al correr y te ven peor.' },
+    { id: 'fitness', name: 'Atletismo', color: '#d8c890', desc: 'Sube corriendo. Más estamina, corres más rápido y te cansas menos.' },
+    { id: 'survival', name: 'Supervivencia', color: '#80b8e8', desc: 'Sube curándote, comiendo, fabricando y registrando. Vendas y comida rinden más, gastas menos y aprendes recetas.' },
+  ];
+  const SKILL_MAX = 10;
+  // XP para pasar del nivel lv al lv+1: 25, 68, 120, 179, 245, 319, 400, 489, 585, 689 (≈ 2900 en total)
+  function xpNeed(lv) { return Math.round(25 * (lv + 1) * (1 + lv * 0.35)); }
+
+  class Skills {
+    constructor() {
+      this.xp = {}; this.lv = {};
+      for (const s of SKILLS) { this.xp[s.id] = 0; this.lv[s.id] = 0; }
+      this.version = 0;
+      this.flash = {};               // id -> segundos de brillo tras subir de nivel (HUD/mochila)
+    }
+    level(id) { return this.lv[id] || 0; }
+    progress(id) { const l = this.level(id); return l >= SKILL_MAX ? 1 : U.clamp(this.xp[id] / xpNeed(l), 0, 1); }
+    gain(id, amount) {
+      if (!(amount > 0) || this.lv[id] === undefined || this.lv[id] >= SKILL_MAX) return;
+      this.xp[id] += amount;
+      let up = false;
+      while (this.lv[id] < SKILL_MAX && this.xp[id] >= xpNeed(this.lv[id])) {
+        this.xp[id] -= xpNeed(this.lv[id]);
+        this.lv[id]++;
+        up = true;
+      }
+      if (this.lv[id] >= SKILL_MAX) this.xp[id] = 0;
+      this.version++;
+      if (up) this.onLevelUp(id);
+    }
+    onLevelUp(id) {
+      const def = Skills.def(id), lv = this.lv[id], g = TM.game;
+      this.flash[id] = 3;
+      if (!g) return;
+      g.notify(`¡${def.name} sube a nivel ${lv}!`, def.color);
+      const p = g.player;
+      if (p && g.fx) g.fx.floatText(p.x, p.y - 30, `${def.name.toUpperCase()} ${lv}`, def.color);
+      if (id === 'fitness' && p) p.maxStamina = this.maxStamina();
+      if (id === 'survival' && TM.Crafting && TM.Crafting.RECIPES) {
+        const names = TM.Crafting.RECIPES.filter((r) => r.skill && r.skill[0] === 'survival' && r.skill[1] === lv).map((r) => r.label || TM.Items.name(r.out[0]));
+        if (names.length && g.later) g.later(1800, () => g.notify('Nueva receta: ' + names.join(', '), '#80b8e8'));
+      }
+    }
+    update(dt) { for (const k in this.flash) { this.flash[k] -= dt; if (this.flash[k] <= 0) delete this.flash[k]; } }
+
+    // ---- efectos (moderados; a nivel 10 compensan aproximadamente la evolución de los zombies hasta el día ~30) ----
+    spreadMul() { return 1 - 0.04 * this.level('aim'); }          // −40 % dispersión
+    reloadMul() { return 1 - 0.03 * this.level('aim'); }          // −30 % tiempo de recarga
+    critAdd() { return 0.01 * this.level('aim'); }                 // +10 % crítico
+    meleeDmgMul() { return 1 + 0.04 * this.level('melee'); }      // +40 % daño
+    meleeStamMul() { return 1 - 0.04 * this.level('melee'); }     // −40 % estamina por golpe
+    meleeRateMul() { return 1 - 0.02 * this.level('melee'); }     // −20 % entre golpes
+    noiseMul() { return 1 - 0.045 * this.level('stealth'); }      // −45 % ruido al correr
+    sightMul() { return 1 - 0.03 * this.level('stealth'); }       // −30 % distancia a la que te ven
+    stealthBonus() { return 0.1 * this.level('stealth'); }        // +1 al multiplicador de sigilo
+    maxStamina() { return 100 + 5 * this.level('fitness'); }      // 150
+    sprintMul() { return 1 + 0.012 * this.level('fitness'); }     // +12 % al correr
+    drainMul() { return 1 - 0.03 * this.level('fitness'); }       // −30 % gasto al correr
+    healMul() { return 1 + 0.05 * this.level('survival'); }       // +50 % curación de medicinas
+    foodMul() { return 1 + 0.03 * this.level('survival'); }       // +30 % comida/agua
+    needsMul() { return 1 - 0.025 * this.level('survival'); }     // −25 % hambre/sed
+
+    serialize() { return { v: 1, xp: Object.assign({}, this.xp), lv: Object.assign({}, this.lv) }; }
+    deserialize(d) {
+      if (!d || typeof d !== 'object') return;
+      for (const s of SKILLS) {
+        const l = d.lv && Number.isFinite(d.lv[s.id]) ? U.clamp(d.lv[s.id] | 0, 0, SKILL_MAX) : 0;
+        const x = d.xp && Number.isFinite(d.xp[s.id]) ? Math.max(0, d.xp[s.id]) : 0;
+        this.lv[s.id] = l;
+        this.xp[s.id] = l >= SKILL_MAX ? 0 : Math.min(x, xpNeed(l) - 0.01);
+      }
+      this.version++;
+    }
+    static def(id) { return SKILLS.find((s) => s.id === id); }
+  }
+  Skills.LIST = SKILLS;
+  Skills.MAX = SKILL_MAX;
+  Skills.xpNeed = xpNeed;
+  TM.Skills = Skills;
+
   class Player {
     constructor(name) {
       this.name = name || 'Superviviente';
@@ -38,7 +127,12 @@
       this.flashlightOn = true;
       this.sprinting = false;
       this.moving = false;
-      this.noise = 0;
+      this.noise = 0;                 // 0..1 (noiseRadius / RUN_NOISE), para compatibilidad
+      this.noiseRadius = 0;           // radio (u) del ruido de los pasos de este frame
+      this.sneaking = false;          // moviéndose despacio (joystick poco desplazado) o quieto
+      this.sightMul = 1;              // multiplicador de la distancia a la que lo ven (agachado, Sigilo)
+      this.skills = new Skills();
+      this._sneakT = 0;
       this.lastDamageTime = -999;
       this.hurtFlash = 0;
       this.walkPhase = 0;
@@ -89,7 +183,9 @@
       const canRun = !game.combat.reloading && !this.action && (!inv || inv.canSprint());
       const wantsSprint = mv.sprint && mv.mag > 0.5 && this.stamina > 2 && canRun;
       this.sprinting = wantsSprint && (this.sprinting || this.stamina > 15);
-      let speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * mv.mag;
+      const sk = this.skills;
+      this.maxStamina = sk.maxStamina();
+      let speed = (this.sprinting ? SPRINT_SPEED * sk.sprintMul() : WALK_SPEED) * mv.mag;
       if (In.aim.active && !this.sprinting) speed *= 0.86;
       if (game.combat.reloading) speed *= 0.9;
       if (this.action) speed *= 0.55;
@@ -113,8 +209,9 @@
       if (this.infection > 0.25) regen *= 0.6;
       if (this.hunger < 15 || this.thirst < 15) regen *= 0.65;
       if (this.sprinting && this.moving) {
-        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * (inv && inv.load() > 1 ? 1.4 : 1) * dt);
+        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * sk.drainMul() * (inv && inv.load() > 1 ? 1.4 : 1) * dt);
         this.staminaDelay = 0.7;
+        sk.gain('fitness', 0.5 * dt);
         if (this.stamina <= 0) this.sprinting = false;
       } else if (this.staminaDelay > 0) this.staminaDelay -= dt;
       else this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
@@ -134,18 +231,40 @@
       this.bodyAngle += U.angDiff(this.bodyAngle, this.aimAngle) * Math.min(1, 18 * dt);
 
       // --- Ruido y pasos ---
-      // sigilo: caminar casi no se oye (más cuanto más rápido), correr sí; quieto = silencio
-      this.noise = this.sprinting ? 1 : this.moving ? 0.1 * mv.mag * mv.mag : 0;
+      // Quieto o despacio (joystick ≤ 60 %): silencioso. Caminar normal: ~1,5 m. Correr: ~10 m (menos con Sigilo).
+      // Ese radio es el ÚNICO modo en que los zombies "oyen" al jugador moverse (emitNoise 'footstep' en cada paso).
+      const running = this.sprinting && this.moving;
+      this.sneaking = !running && (!this.moving || mv.mag <= SNEAK_MAG + 1e-3);
+      let nr = 0;
+      if (running) nr = RUN_NOISE * sk.noiseMul();
+      else if (this.moving && !this.sneaking) nr = WALK_NOISE * U.clamp((mv.mag - SNEAK_MAG) / (1 - SNEAK_MAG), 0.3, 1) * (1 - 0.05 * sk.level('stealth'));
+      this.noiseRadius = nr;
+      this.noise = nr / RUN_NOISE;
+      // agachado/quieto: cuesta más verte; Sigilo también
+      this.sightMul = (this.sneaking ? 0.75 : 1) * sk.sightMul();
       if (this.moving) {
         this.walkPhase += sp * dt * 0.09;
         this.stepAcc += sp * dt;
         const stepLen = this.sprinting ? 52 : 44;
         if (this.stepAcc > stepLen) {
           this.stepAcc = 0;
-          if (TM.Audio) TM.Audio.play('footstep', this.x, this.y, { volume: this.sprinting ? 0.5 : 0.28 });
-          if (this.sprinting) game.emitNoise(this.x, this.y, 220, 'footstep');
+          if (TM.Audio) TM.Audio.play('footstep', this.x, this.y, { volume: this.sprinting ? 0.5 : this.sneaking ? 0.12 : 0.28 });
+          if (nr > 0) game.emitNoise(this.x, this.y, nr, 'footstep');
         }
       }
+      // Sigilo: moverse despacio cerca de zombies que no te han detectado
+      this._sneakT -= dt;
+      if (this._sneakT <= 0) {
+        this._sneakT = 0.5;
+        if (this.moving && this.sneaking && game.zombies) {
+          for (const z of game.zombies) {
+            if (z.dead || z.alerted || z.fakeDead || z.state === 'ambush') continue;
+            const dx = z.x - this.x, dy = z.y - this.y;
+            if (dx * dx + dy * dy < 230 * 230) { sk.gain('stealth', 0.6); break; }
+          }
+        }
+      }
+      sk.update(dt);
 
       this.updateNeeds(dt, game);
       this.updateAction(dt, game);
@@ -160,7 +279,7 @@
 
     // ---------- necesidades y estados ----------
     updateNeeds(dt, game) {
-      const act = this.sprinting && this.moving ? 1.7 : this.moving ? 1 : 0.7;
+      const act = (this.sprinting && this.moving ? 1.7 : this.moving ? 1 : 0.7) * this.skills.needsMul();
       const biome = game.world.biomeAt ? game.world.biomeAt(this.x, this.y) : '';
       const heat = biome === 'desert' && !game.isNight ? 1.35 : 1;
       this.hunger = Math.max(0, this.hunger - HUNGER_RATE * act * dt);
@@ -268,10 +387,15 @@
       const d = TM.Items.DB[a.id];
       inv.removeStack(a.stack, 1);
       const parts = [];
-      if (d.food) { this.hunger = U.clamp(this.hunger + d.food, 0, 100); parts.push(`+${d.food} comida`); }
-      if (d.water) { this.thirst = U.clamp(this.thirst + d.water, 0, 100); if (d.water > 0) parts.push(`+${d.water} agua`); }
+      const sk = this.skills, fm = sk.foodMul();
+      if (d.food) { const f = Math.round(d.food * fm); this.hunger = U.clamp(this.hunger + f, 0, 100); parts.push(`+${f} comida`); }
+      if (d.water) { const wv = d.water > 0 ? Math.round(d.water * fm) : d.water; this.thirst = U.clamp(this.thirst + wv, 0, 100); if (wv > 0) parts.push(`+${wv} agua`); }
       if (d.stam) this.stamina = Math.min(this.maxStamina, this.stamina + d.stam);
-      if (d.heal) { const h = Math.min(d.heal, this.maxHp - this.hp); this.hp += h; if (h >= 1) parts.push(`+${Math.round(h)} vida`); }
+      if (d.heal) {
+        const h = Math.min(d.heal * (d.cat === 'med' ? sk.healMul() : 1), this.maxHp - this.hp);
+        this.hp += h; if (h >= 1) parts.push(`+${Math.round(h)} vida`);
+      }
+      sk.gain('survival', d.cat === 'med' ? 6 : 2.5);
       if (d.stopBleed && this.bleedT > 0) { this.bleedT = 0; parts.push('sangrado detenido'); }
       if (d.cureInf && this.infection > 0) { this.infection = 0; this._warn.inf = false; game.notify('La infección remite', '#8fc870'); }
       if (d.pain) { this.painT = d.pain; parts.push('sin dolor'); }

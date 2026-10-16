@@ -184,6 +184,61 @@
       const kills = g.totalKills();
       const km = (Math.hypot(p.x, p.y) / TM.Config.UNITS_PER_M / 1000).toFixed(2);
       ctx.fillText(`☠ ${kills}    ⌖ ${km} km`, x, sy + 4);
+      if (p.alive) this.drawStealth(ctx, g, p, x, sy + 20, s);
+    }
+
+    // Indicador de sigilo: ojo (se llena con la sospecha de los zombies que te están viendo; rojo = te vieron)
+    // y ondas de ruido (pasos: 0 en sigilo, 1 caminando, 3 corriendo). Así se entiende por qué te detectan.
+    drawStealth(ctx, g, p, x, y, s) {
+      let aware = 0, seen = false, hunted = false;
+      for (const z of g.zombies) {
+        if (z.dead || z.remove || z.fakeDead || z.state === 'ambush') continue;
+        const pd = z._pd;
+        if (!(pd < 1200)) continue;
+        if (z.alerted) {
+          if (z.seesPlayer) seen = true; else if (pd < 700) hunted = true;
+        } else if (z.aware > aware) aware = z.aware;
+      }
+      const k = seen ? 1 : aware;
+      const noise = U.clamp(p.noiseRadius / 330, 0, 1);
+      // suavizado para que no parpadee
+      this._eye = (this._eye || 0) + (k - (this._eye || 0)) * Math.min(1, (this.lastDt || 0.016) * 8);
+      const e = this._eye;
+      const col = seen ? '#e04030' : e > 0.5 ? '#e08a30' : e > 0.02 ? '#d8c060' : '#8fb88a';
+      const ew = 10, eh = 6, cx = x + ew;
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      // fondo
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      rrect(ctx, x - 4, y - 10, 104, 19, 6); ctx.fill();
+      // ojo: almendra con relleno de abajo arriba según la sospecha
+      const lid = () => { ctx.beginPath(); ctx.moveTo(cx - ew, y); ctx.quadraticCurveTo(cx, y - eh * 1.7, cx + ew, y); ctx.quadraticCurveTo(cx, y + eh * 1.7, cx - ew, y); ctx.closePath(); };
+      lid(); ctx.fillStyle = 'rgba(20,20,18,0.9)'; ctx.fill();
+      if (e > 0.01) {
+        ctx.save(); lid(); ctx.clip();
+        ctx.fillStyle = col; ctx.globalAlpha = 0.85;
+        const hh = eh * 2 * e;
+        ctx.fillRect(cx - ew, y + eh - hh, ew * 2, hh);
+        ctx.restore();
+      }
+      lid(); ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = seen ? '#fff0e0' : 'rgba(230,225,210,0.85)';
+      ctx.beginPath(); ctx.arc(cx, y, seen ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill();
+      // ondas de ruido
+      const wx = cx + ew + 5;
+      const lit = noise <= 0 ? 0 : noise < 0.25 ? 1 : noise < 0.6 ? 2 : 3;
+      for (let i = 0; i < 3; i++) {
+        ctx.strokeStyle = i < lit ? (lit >= 3 ? '#e8a050' : '#e0d6c0') : 'rgba(200,190,170,0.22)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.arc(wx, y, 3 + i * 4, -0.75, 0.75); ctx.stroke();
+      }
+      // texto
+      const label = seen ? 'TE VEN' : hunted ? 'TE BUSCAN' : e > 0.05 ? 'SOSPECHAN' : p.sneaking ? 'SIGILO' : lit >= 3 ? 'RUIDO' : 'OCULTO';
+      ctx.font = `700 ${Math.max(9, Math.round(s * 0.19))}px ${FONT}`;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = seen ? '#ff8a70' : hunted ? '#f0b070' : e > 0.05 ? '#e8d080' : 'rgba(200,215,190,0.8)';
+      ctx.fillText(label, wx + 16, y + 4);
+      ctx.restore();
     }
 
     drawClock(ctx, g, W, s) {
@@ -457,7 +512,7 @@
         if (g.time < 90) {
           ctx.globalAlpha = Math.min(1, (90 - g.time) / 10);
           ctx.font = `11px ${FONT}`; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(200,190,170,0.5)';
-          ctx.fillText('WASD mover · MAYÚS correr · ratón apuntar · clic atacar · E usar · I mochila · Q / rueda cambiar arma · 1-3 rápidos · R recargar · ESPACIO empujar · F linterna', In.w / 2, In.h - In.s * 1.3);
+          ctx.fillText('WASD mover · MAYÚS correr · C sigilo · ratón apuntar · clic atacar · E usar · I mochila · Q / rueda cambiar arma · 1-3 rápidos · R recargar · ESPACIO empujar · F linterna', In.w / 2, In.h - In.s * 1.3);
           ctx.globalAlpha = 1;
         }
         for (const id of ['pause', 'q1', 'q2', 'q3', 'bag']) this.drawButton(ctx, find(id), p, g);

@@ -114,6 +114,24 @@
 .cr-row.locked { opacity: 0.55; }
 .cr-row.locked .cr-st { background: #2a3a5a; color: #c0d0f0; }
 .cr-row.sel { outline: 2px solid #e8c070; outline-offset: -1px; }
+/* Habilidades */
+.sk-row {
+  display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto auto; column-gap: 8px; row-gap: 3px;
+  padding: 6px 10px; text-align: left; background: #24201c; border: 1px solid #3a332c; border-radius: 6px; color: #e0d8c8;
+  border-left: 4px solid var(--skc, #888);
+}
+.sk-row.sel { outline: 2px solid #e8c070; outline-offset: -1px; }
+.sk-row.up { animation: skUp 0.6s ease-in-out 4 alternate; }
+@keyframes skUp { to { background: #3a3428; } }
+.sk-name { font-size: 14px; font-weight: 800; }
+.sk-lv { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-size: 22px; font-weight: 900; color: var(--skc, #ddd); min-width: 26px; text-align: right; }
+.sk-pips { display: flex; gap: 3px; }
+.sk-pips i { flex: 1; height: 6px; max-width: 22px; border-radius: 2px; background: #0b0a09; border: 1px solid #3a332c; }
+.sk-pips i.on { background: var(--skc, #ccc); border-color: transparent; }
+.sk-xp { grid-column: 1 / span 2; height: 3px; background: #0b0a09; border-radius: 2px; overflow: hidden; }
+.sk-xp i { display: block; height: 100%; background: var(--skc, #ccc); opacity: 0.75; }
+.sk-ok { color: #a8d890; } .sk-no { color: #8a8070; }
+
 .cr-need { display: flex; flex-direction: column; gap: 4px; }
 .need { display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 2px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.25); }
 .need img { width: 30px; height: 30px; flex: none; }
@@ -177,9 +195,14 @@
   .inv-box { height: 100vh; width: 100vw; border: 0; border-radius: 0; }
   .inv-head { height: 44px; }
   .inv-tab { height: 36px; padding: 0 12px; }
+  .sk-row { padding: 4px 8px; row-gap: 2px; }
   .inv-detail { padding: 8px 10px; gap: 6px; }
   .d-head img { width: 46px; height: 46px; }
   .ibtn { min-height: 40px; }
+}
+@media (max-width: 800px) {
+  .inv-tab { padding: 0 9px; font-size: 13px; letter-spacing: 0.03em; }
+  .inv-wbar { flex-basis: 70px; }
 }
 @media (max-width: 700px) {
   .inv-wbar { flex-basis: 90px; }

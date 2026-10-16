@@ -53,6 +53,8 @@
     }
 
     get inv() { const p = this.game.player; return p && p.inventory; }
+    get skills() { const p = this.game.player; return p && p.skills; }
+    xp(id, n) { const sk = this.skills; if (sk) sk.gain(id, n); }
     get weaponId() { const inv = this.inv; return inv ? inv.activeWeaponId() : 'pistol'; }
     get weapon() { return WEAPONS[this.weaponId] || WEAPONS.fists; }
     get gunStack() { const inv = this.inv; const s = inv && !inv.ready ? inv.equipped : null; return s && WEAPONS[DB()[s.id].weapon].kind === 'gun' ? s : null; }
@@ -166,7 +168,7 @@
         return false;
       }
       this.reloading = true;
-      this.reloadT = this.reloadMax = w.reloadTime;
+      this.reloadT = this.reloadMax = w.reloadTime * (this.skills ? this.skills.reloadMul() : 1);
       if (TM.Audio) TM.Audio.play('reload', p.x, p.y, w.perRound ? { volume: 0.6, pitch: 1.2 } : undefined);
       return true;
     }
@@ -180,7 +182,7 @@
       if (w.perRound) {
         if (inv.remove(w.ammo, 1)) s.mag++;
         if (s.mag < w.magSize && inv.count(w.ammo) > 0) {
-          this.reloadT = this.reloadMax = w.reloadTime;
+          this.reloadT = this.reloadMax = w.reloadTime * (this.skills ? this.skills.reloadMul() : 1);
           if (TM.Audio) TM.Audio.play('reload', p.x, p.y, { volume: 0.5, pitch: 1.25 });
         } else this.reloading = false;
       } else {
@@ -218,7 +220,8 @@
       p.aimHold = 0.6;
 
       const base = this.assist(p.aimAngle, w.range, w.pellets > 1 ? 0.22 : 0.16);
-      const moveSpread = p.moving ? (w.moveSpread || 1.6) : 1;
+      const sk = this.skills;
+      const moveSpread = (p.moving ? (w.moveSpread || 1.6) : 1) * (sk ? sk.spreadMul() : 1);
       const mx = p.x + Math.cos(base) * 24, my = p.y + Math.sin(base) * 24;
       const hits = new Map();   // zombie -> daño acumulado (un solo takeDamage por zombie)
       let wallHit = null;
@@ -267,11 +270,13 @@
       let anyKill = false, anyCrit = false;
       for (const [z, h] of hits) {
         const L = Math.hypot(h.dx, h.dy) || 1;
-        const crit = U.chance(w.crit || 0);
+        const crit = U.chance((w.crit || 0) + (w.crit && sk ? sk.critAdd() : 0));
         if (crit) { anyCrit = true; g.fx.floatText(z.x, z.y - 18, '¡CRÍTICO!', '#e8c070'); }
         const killed = z.takeDamage(h.dmg * (crit ? 2 : 1), 'bullet', h.dx / L, h.dy / L);
         if (killed) anyKill = true;
       }
+      // Puntería: sube sobre todo acertando (un poco al fallar)
+      this.xp('aim', hits.size ? 3 + (anyKill ? 3 : 0) : 0.4);
       if (hits.size) {
         this.shotsHit++;
         if (anyKill) g.hitstop(w.pellets > 1 || w.pierce ? 0.045 : 0.035);
@@ -316,9 +321,11 @@
 
     startSwing(w) {
       const g = this.game, p = g.player;
-      const tired = p.stamina < w.stamina;
-      if (!tired) { p.stamina -= w.stamina; p.staminaDelay = 0.5; }
-      this.cooldown = w.fireDelay * (tired ? 1.5 : 1);
+      const sk = this.skills;
+      const cost = w.stamina * (sk ? sk.meleeStamMul() : 1);
+      const tired = p.stamina < cost;
+      if (!tired) { p.stamina -= cost; p.staminaDelay = 0.5; }
+      this.cooldown = w.fireDelay * (tired ? 1.5 : 1) * (sk ? sk.meleeRateMul() : 1);
       const ang = this.meleeAssist(p.aimAngle, w);
       p.aimAngle = ang;
       p.aimHold = 0.5;
@@ -345,16 +352,20 @@
       }
       targets.sort((a, b) => a.d - b.d);
       let hits = 0, kills = 0;
+      const sk = this.skills;
       for (let i = 0; i < targets.length && i < w.maxHits; i++) {
         const { z, za } = targets[i];
         const nx = Math.cos(za), ny = Math.sin(za);
-        let dmg = w.damage * U.randRange(0.9, 1.1) * (s.tired ? 0.6 : 1) * (i ? 0.75 : 1);
-        // sigilo: golpe a un zombie que no te ha visto
-        if (!z.alerted && !z.fakeDead) {
-          dmg *= w.stealth || 1.5;
+        let dmg = w.damage * U.randRange(0.9, 1.1) * (s.tired ? 0.6 : 1) * (i ? 0.75 : 1) * (sk ? sk.meleeDmgMul() : 1);
+        // sigilo: golpe a un zombie que no te ha visto (cuchillo ×3; Sigilo suma hasta +1)
+        const sneak = !z.alerted && !z.fakeDead;
+        if (sneak) {
+          dmg *= (w.stealth || 1.5) + (sk ? sk.stealthBonus() : 0);
           g.fx.floatText(z.x, z.y - 20, '¡SIGILO!', '#a8d0a0');
         }
         const killed = z.takeDamage(dmg, 'melee', nx, ny);
+        if (sneak) this.xp('stealth', killed ? 14 : 6);
+        this.xp('melee', killed ? 6 : 3);
         if (killed) kills++;
         else if (w.knock) z.shove(nx, ny, w.knock * (s.tired ? 0.6 : 1));
         g.fx.spark(z.x - nx * z.r, z.y - ny * z.r, -nx, -ny, 3);
@@ -434,6 +445,7 @@
         z.shove(nx, ny, 340);
         z.takeDamage(7, 'melee', nx, ny);
         hits++;
+        this.xp('melee', 0.8);
       }
       g.fx.swipe(p.x, p.y, ang);
       if (TM.Audio) TM.Audio.play('shove', p.x, p.y, { volume: hits ? 1 : 0.5 });

@@ -130,6 +130,7 @@
         if (Number.isFinite(d.needs.hunger)) p.hunger = U.clamp(d.needs.hunger, 0, 100);
         if (Number.isFinite(d.needs.thirst)) p.thirst = U.clamp(d.needs.thirst, 0, 100);
       }
+      if (d.skills && p.skills) { p.skills.deserialize(d.skills); p.maxStamina = p.skills.maxStamina(); }
       // el mapa puede haber cambiado entre versiones: no aparecer dentro de una pared
       if (this.world.findFree && !this.world.isFree(p.x, p.y, p.r + 1)) {
         const f = this.world.findFree(p.x, p.y, p.r + 1, 600);
@@ -155,6 +156,7 @@
         world: this.world.serialize ? this.world.serialize() : null,
         inventory: p.inventory && p.inventory.serialize ? p.inventory.serialize() : null,
         needs: { hunger: p.hunger, thirst: p.thirst },
+        skills: p.skills ? p.skills.serialize() : null,   // v2+: habilidades (opcional; partidas antiguas sin él)
       };
     }
 
