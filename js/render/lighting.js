@@ -121,6 +121,13 @@
       const k = cam.zoom * s;
       const ox = -(cam.x - cam.viewW / 2) * k, oy = -(cam.y - cam.viewH / 2) * k;
       lc.setTransform(k, 0, 0, k, ox, oy);
+      // interiores más oscuros que la calle (solo el edificio donde está el jugador, cuyo techo se ha desvanecido)
+      const ind = game.world && game.world.indoorShade ? game.world.indoorShade() : null;
+      const indoorK = ind ? ind.k : 0;
+      if (indoorK > 0.01) {
+        lc.fillStyle = `rgba(${r},${g},${b},${(TM.Config.WORLD.INDOOR_DARK * indoorK).toFixed(3)})`;
+        lc.fillRect(ind.x, ind.y, ind.w, ind.h);
+      }
       lc.globalCompositeOperation = 'destination-out';
 
       const p = game.player;
@@ -145,7 +152,7 @@
         pc.restore();
       }
       pc.globalAlpha = 1;
-      if (alpha > 0.25) this.castShadows(pc, game, p.x, p.y, Math.max(L, amb) + 20);
+      if (alpha > 0.25 || indoorK > 0.2) this.castShadows(pc, game, p.x, p.y, Math.max(L, amb) + 20, p.flashlightOn ? p.aimAngle : null, amb);
       lc.setTransform(1, 0, 0, 1, 0, 0);
       lc.drawImage(this.pcanvas, 0, 0);
       lc.setTransform(k, 0, 0, k, ox, oy);
@@ -159,9 +166,36 @@
       main.drawImage(this.canvas, 0, 0, this.cssW, this.cssH);
     }
 
-    castShadows(pc, game, lx, ly, range) {
+    castShadows(pc, game, lx, ly, range, aim, amb) {
       const obs = this._obs; obs.length = 0;
       game.world.queryObstacles(lx - range, ly - range, lx + range, ly + range, obs);
+      // descarta obstáculos fuera de la zona iluminada (cono + círculo ambiente): su sombra no la toca
+      if (aim !== null && aim !== undefined) {
+        const half = 0.62, amb2 = (amb + 6) * (amb + 6);
+        let n = 0;
+        for (let i = 0; i < obs.length; i++) {
+          const o = obs[i];
+          if (!o.blocksSight) continue;
+          let keep = false;
+          if (o.shape === 'rect') {
+            const qx = U.clamp(lx, o.x, o.x + o.w), qy = U.clamp(ly, o.y, o.y + o.h);
+            if ((qx - lx) * (qx - lx) + (qy - ly) * (qy - ly) < amb2) keep = true;
+            else {
+              let pos = 0, neg = 0;
+              const cs = [o.x, o.y, o.x + o.w, o.y, o.x, o.y + o.h, o.x + o.w, o.y + o.h];
+              for (let c = 0; c < 8; c += 2) {
+                const d = U.angDiff(aim, Math.atan2(cs[c + 1] - ly, cs[c] - lx));
+                if (Math.abs(d) <= half) { keep = true; break; }
+                if (d > 0) pos++; else neg++;
+              }
+              // esquinas a ambos lados del cono: el rectángulo lo cruza
+              if (!keep && pos && neg) keep = true;
+            }
+          } else keep = true;
+          if (keep) obs[n++] = o;
+        }
+        obs.length = n;
+      }
       const FAR = 1600;
       pc.globalCompositeOperation = 'destination-out';
       pc.fillStyle = '#fff';

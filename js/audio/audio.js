@@ -1,6 +1,8 @@
 // Tierra Muerta — audio 100 % sintetizado con Web Audio API (sin archivos).
 // init() pre-renderiza cada efecto (2–4 variaciones) con OfflineAudioContext;
 // reproducir es solo BufferSource + Gain (+ paso-bajo por distancia) + StereoPanner.
+// Interior (setAmbience.indoor): paso-bajo al exterior + envío a una sala corta (convolución).
+// setFire(0..1): bucle de fuego cercano.
 (function () {
   'use strict';
   const TM = window.TM = window.TM || {};
@@ -25,16 +27,21 @@
   function num(v, d) { return typeof v === 'number' && v === v ? clamp01(v) : d; }
   function loadMuted() { try { return window.localStorage.getItem(KEY) === '1'; } catch (e) { return false; } }
 
+  const WX_OPEN = 18000;    // paso-bajo de viento/lluvia al aire libre (transparente)
+  const WX_SHUT = 650;      // ... y dentro de un edificio
+  const ROOM_SEND = 0.45;   // envío a la reverberación de sala con indoor = 1
+
   // --- Estado ---
-  let ctx = null, master = null, sfxBus = null, ambBus = null, distIn = null;
-  const layers = {};        // capas en bucle: wind, rain, drone, tension, music (GainNode)
+  let ctx = null, master = null, comp = null, sfxBus = null, ambBus = null, distIn = null;
+  let wxLp = null, roomIn = null, fireLp = null, fireLvl = 0;
+  const layers = {};        // capas en bucle: wind, rain, drone, tension, music, fire (GainNode)
   const applied = {};       // último nivel aplicado a cada capa
   const bank = {};          // nombre -> [AudioBuffer]
   const voices = [];        // voces de efectos vivas
   const lastT = {}, lastV = {};
   let lx = 0, ly = 0;
   let noiseCache = {}, curveCache = {};
-  const amb = { night: 0, rain: 0, danger: 0, combat: 0, health: 1 };
+  const amb = { night: 0, rain: 0, danger: 0, combat: 0, health: 1, indoor: 0 };
   let ambT = -1, beatT = 0, padT = 0, bellT = 0, oneT = 0, thunT = 0, lastThunder = -99;
   let lastPad = 99, lastBell = 99, muteTimer = 0;
 
@@ -46,7 +53,8 @@
     toggleMuted: toggleMuted,
     setListener: setListener,
     play: play,
-    setAmbience: setAmbience
+    setAmbience: setAmbience,
+    setFire: setFire
   };
   TM.Audio = A;
 
@@ -279,18 +287,111 @@
     return b;
   }
 
+  // Eco discreto con realimentación (retardo + paso-bajo en el lazo).
+  function echo(c, inp, out, dt, fb, f, wet) {
+    const dl = c.createDelay(1);
+    dl.delayTime.value = dt;
+    const lp = flt(c, 'lowpass', f, 0);
+    wire(inp, dl, lp, amp(c, fb), dl);
+    wire(lp, amp(c, wet), out);
+  }
+
+  // Barrido de ruido con envolvente de campana (silbido de aire, roce de tela).
+  function swish(c, out, t, d, f0, f1, lvl, q, kind) {
+    const b = flt(c, 'bandpass', f0, q || 1.2);
+    ramp(b.frequency, t, [[0, f0], [d * 0.55, f1], [d, f0 * 0.8]], true);
+    const g = amp(c, 0);
+    ramp(g.gain, t, [[0, 0], [d * 0.55, lvl], [d, 0]]);
+    wire(nz(c, kind || 'pink', t, t + d + 0.02), b, g, out);
+  }
+
+  // Crujido (madera, bisagra): tren de pulsos irregular por resonancias F [[Hz, Q, gan]].
+  function creak(c, out, t, d, f0, f1, lvl, F) {
+    const o = osc(c, 'sawtooth', f0, t, t + d + 0.02), pts = [[0, f0]];
+    for (let k = 1; k <= 4; k++) pts.push([d * k / 4, Math.max(8, (f0 + (f1 - f0) * k / 4) * R(0.75, 1.25))]);
+    ramp(o.frequency, t, pts, true);
+    wire(nz(c, 'brown', t, t + d + 0.02), flt(c, 'lowpass', 25, 0), amp(c, f0 * 0.5), o.frequency);
+    const g = amp(c, 0), gp = [[0, 0], [Math.min(0.04, d * 0.2), lvl]];
+    for (let k = 1; k < 5; k++) gp.push([d * (0.15 + 0.17 * k), lvl * R(0.35, 1)]);
+    gp.push([d, 0]);
+    ramp(g.gain, t, gp);
+    const sh = shaper(c, 2.5);
+    o.connect(sh);
+    for (let i = 0; i < F.length; i++) wire(sh, flt(c, 'bandpass', F[i][0], F[i][1]), amp(c, F[i][2]), g);
+    g.connect(out);
+  }
+
+  // Modos resonantes (metal, madera, vidrio): senos con caída exponencial.
+  function ring(c, out, t, f, rs, lvl, dec) {
+    const ny = c.sampleRate * 0.45;
+    for (let i = 0; i < rs.length; i++) {
+      const fr = f * rs[i] * R(0.985, 1.015), dd = dec / (1 + i * 0.5);
+      if (fr > ny) break;
+      wire(osc(c, 'sine', fr, t, t + dd + 0.05), pe(c, t, 0.0008, lvl / (i + 1), dd), out);
+    }
+  }
+
+  // Burbuja: seno con barrido ascendente.
+  function bubble(c, out, t, f0, f1, d, lvl) {
+    const o = osc(c, 'sine', f0, t, t + d + 0.03);
+    ramp(o.frequency, t, [[0, f0], [d, f1]], true);
+    wire(o, pe(c, t, 0.002, lvl, d), out);
+  }
+
+  // Llamas: rugido grave que parpadea + siseo + chasquidos y estallidos de brasas.
+  function flames(c, out, t0, t1) {
+    const fl = amp(c, 0.7);
+    wire(nz(c, 'brown', t0, t1, 0.77), flt(c, 'lowpass', 7, 0), amp(c, 1.6), fl.gain);
+    wire(nz(c, 'brown', t0, t1, 1.3), flt(c, 'lowpass', 420, 0), fl, out);
+    wire(nz(c, 'pink', t0, t1), flt(c, 'bandpass', 1100, 0.6), amp(c, 0.22), fl);
+    // chasquidos por tramos de 1 s con fuente propia: cada filtro solo procesa mientras suena
+    for (let s = t0; s < t1 - 0.1; s += 1) {
+      const e = Math.min(s + 1, t1 - 0.05);
+      grains(c, out, s, e, Math.max(1, Math.round((e - s) * 14)), 1500, 6000, 0.4, 0.002, 0.01);
+    }
+    for (let i = 0; i < (t1 - t0) * 1.5; i++) {
+      const tt = R(t0, t1 - 0.1);
+      wire(nz(c, 'white', tt, tt + 0.06), flt(c, 'bandpass', R(450, 1000), 1.5), pe(c, tt, 0.0005, R(0.5, 1.1), R(0.02, 0.045)), out);
+    }
+  }
+
+  // Respuesta de sala corta (~0,35 s, oscura) para interiores; energía unitaria.
+  function roomIR(sr) {
+    const n = Math.floor(sr * 0.35), b = ctx.createBuffer(2, n, sr), p0 = (sr * 0.003) | 0;
+    for (let k = 0; k < 2; k++) {
+      const d = b.getChannelData(k);
+      let y = 0, e = 0;
+      for (let i = p0; i < n; i++) {
+        const x = (i - p0) / (n - p0);
+        y += (0.55 * (1 - x) + 0.08) * ((Math.random() * 2 - 1) - y);
+        d[i] = y * Math.exp(-(i - p0) / (sr * 0.055));
+        e += d[i] * d[i];
+      }
+      // primeras reflexiones (paredes cercanas)
+      const a = Math.sqrt(e);
+      for (let r = 0; r < 6; r++) d[p0 + ((sr * R(0.002, 0.03)) | 0)] += a * R(0.12, 0.28) * (Math.random() < 0.5 ? -1 : 1);
+      e = 0;
+      for (let i = 0; i < n; i++) e += d[i] * d[i];
+      const s = e > 0 ? 1 / Math.sqrt(e) : 0;
+      for (let i = 0; i < n; i++) d[i] *= s;
+    }
+    return b;
+  }
+
   // =====================================================================
   // Definición de efectos
   // d: duración renderizada, n: variaciones, sr: muestreo, vol: nivel base,
   // max: voces del mismo nombre, pv: variación de tono, pri: prioridad, gap: separación mínima,
-  // rms: sonoridad objetivo al normalizar (más alto = más fuerte, limitado por el pico)
+  // rms: sonoridad objetivo al normalizar (más alto = más fuerte, limitado por el pico),
+  // dry: sin sala de interior (interfaz), wx: sonido de exterior (se amortigua dentro)
   // =====================================================================
   const S = {};
   function def(name, o) {
     S[name] = {
       d: o.d, b: o.b, n: o.n || 3, sr: o.sr || 22050, ch: o.ch || 1,
       vol: o.vol == null ? 0.6 : o.vol, max: o.max || 4, pv: o.pv == null ? 0.05 : o.pv,
-      pri: o.pri || 1, gap: o.gap == null ? 0.02 : o.gap, rms: o.rms || RMS_T
+      pri: o.pri || 1, gap: o.gap == null ? 0.02 : o.gap, rms: o.rms || RMS_T,
+      dry: !!o.dry, wx: !!o.wx
     };
   }
 
@@ -522,7 +623,7 @@
     wire(nz(c, 'pink', 0, 0.12), flt(c, 'bandpass', R(900, 1500), 0.8), pe(c, 0.005, 0.01, 0.3, 0.07), out);
   } });
 
-  def('ui_click', { d: 0.12, sr: 32000, n: 2, vol: 0.35, max: 2, pv: 0.03, pri: 3, b: function (c, v, out) {
+  def('ui_click', { d: 0.12, sr: 32000, n: 2, vol: 0.35, max: 2, pv: 0.03, pri: 3, dry: true, b: function (c, v, out) {
     const f = v ? 760 : 680;
     const o = osc(c, 'sine', f, 0, 0.1);
     ramp(o.frequency, 0, [[0, f], [0.05, f * 0.7]], true);
@@ -531,7 +632,7 @@
     wire(nz(c, 'white', 0, 0.02), flt(c, 'highpass', 3000, 0), pe(c, 0, 0.0004, 0.35, 0.012), out);
   } });
 
-  def('ui_notify', { d: 2.8, sr: 22050, n: 2, vol: 0.6, max: 1, pv: 0, pri: 3, b: function (c, v, out) {
+  def('ui_notify', { d: 2.8, sr: 22050, n: 2, vol: 0.6, max: 1, pv: 0, pri: 3, dry: true, b: function (c, v, out) {
     const pre = amp(c, 1), base = v ? 49 : 55;
     // gong grave y disonante (segunda menor que bate)
     const P = [[1, 1, 2.4], [1.06, 0.5, 2.0], [2, 0.5, 1.8], [2.83, 0.3, 1.2], [4.2, 0.15, 0.8], [5.4, 0.1, 0.6]];
@@ -550,7 +651,7 @@
     clk(c, out, R(0.03, 0.045), R(2200, 2800), 0.35, 0.01);
   } });
 
-  def('thunder', { d: 7, sr: 16000, n: 3, vol: 0.9, max: 2, pv: 0.06, pri: 1, gap: 0.5, rms: 0.26, b: function (c, v, out) {
+  def('thunder', { d: 7, sr: 16000, n: 3, vol: 0.9, max: 2, pv: 0.06, pri: 1, gap: 0.5, rms: 0.26, wx: true, b: function (c, v, out) {
     const pre = amp(c, 1), near = v === 0, t0 = R(0.05, 0.3);
     // chasquido inicial (apagado por la distancia)
     wire(nz(c, 'white', t0, t0 + 1), flt(c, 'lowpass', near ? 2400 : 1000, 0), pe(c, t0, 0.015, near ? 0.7 : 0.3, 0.7), pre);
@@ -578,6 +679,419 @@
     beat(0.01, 1);
     beat(R(0.25, 0.29), 0.75);
     wire(pre, shaper(c, 1.6), flt(c, 'lowpass', 700, 0), out);
+  } });
+
+  // =====================================================================
+  // Fase 2: armas, puertas, objetos, fuego
+  // =====================================================================
+
+  def('shot_shotgun', { d: 1.8, sr: 32000, n: 3, vol: 1, max: 4, pv: 0.035, pri: 2.6, gap: 0.05, rms: 0.55, b: function (c, v, out) {
+    const t = 0.002, pre = amp(c, 1);
+    wire(pre, shaper(c, 3.5), out);
+    // chasquido
+    wire(nz(c, 'white', t, t + 0.12), flt(c, 'highpass', R(1100, 1800), 0), pe(c, t, 0.0008, 1.1, R(0.05, 0.08)), pre);
+    // cuerpo ancho: dos bandas graves/medias
+    wire(nz(c, 'white', t, t + 0.45), flt(c, 'bandpass', R(260, 400), 0.7), pe(c, t, 0.0015, 2.4, R(0.2, 0.28)), pre);
+    wire(nz(c, 'pink', t, t + 0.35), flt(c, 'bandpass', R(800, 1300), 0.6), pe(c, t, 0.001, 1.3, R(0.12, 0.18)), pre);
+    // golpe grave largo + armónico para altavoz pequeño
+    const o = osc(c, 'sine', 130, t, t + 0.6);
+    ramp(o.frequency, t, [[0, R(115, 145)], [0.2, R(32, 40)]], true);
+    wire(o, pe(c, t, 0.003, 1.9, 0.4), pre);
+    thump(c, pre, t, R(230, 270), 110, 0.7, 0.14);
+    clk(c, pre, t + R(0.015, 0.025), R(1800, 2400), 0.2, 0.04);
+    // cola: retumbo del entorno
+    const lp = flt(c, 'lowpass', 800, 0);
+    ramp(lp.frequency, t, [[0, R(600, 900)], [1.4, 120]], true);
+    wire(nz(c, 'brown', t, 1.75), lp, pe(c, t + 0.006, 0.02, 1.2, R(1.0, 1.4)), out);
+    wire(pre, amp(c, R(0.3, 0.45)), verb(c, 1.3, 3, 0.5), out);
+  } });
+
+  def('shot_rifle', { d: 2.6, sr: 32000, n: 3, vol: 1, max: 3, pv: 0.03, pri: 2.8, gap: 0.08, rms: 0.62, b: function (c, v, out) {
+    const t = 0.002, pre = amp(c, 1);
+    wire(pre, shaper(c, 4.5), out);
+    // estampido supersónico: muy corto y seco
+    wire(nz(c, 'white', t, t + 0.05), flt(c, 'highpass', R(2200, 3200), 0), pe(c, t, 0.0003, 1.8, R(0.02, 0.03)), pre);
+    wire(nz(c, 'white', t, t + 0.15), flt(c, 'bandpass', R(700, 1100), 1), pe(c, t, 0.0006, 2, R(0.06, 0.09)), pre);
+    const o = osc(c, 'sine', 190, t, t + 0.3);
+    ramp(o.frequency, t, [[0, R(170, 210)], [0.07, R(42, 50)]], true);
+    wire(o, pe(c, t, 0.0015, 1.7, 0.17), pre);
+    thump(c, pre, t, R(300, 360), 150, 0.6, 0.06);
+    // eco largo: rebotes discretos del entorno + reverberación oscura
+    const e = amp(c, 1);
+    wire(pre, flt(c, 'lowpass', R(1800, 2600), 0), e);
+    echo(c, e, out, R(0.26, 0.36), R(0.42, 0.5), 1300, R(0.45, 0.6));
+    wire(e, amp(c, 0.3), verb(c, 2.2, 2.4, 0.35), out);
+    const lp = flt(c, 'lowpass', 700, 0);
+    ramp(lp.frequency, t, [[0, R(600, 800)], [2.0, 100]], true);
+    wire(nz(c, 'brown', t, 2.5), lp, pe(c, t + 0.005, 0.01, 0.8, R(1.6, 2.1)), out);
+  } });
+
+  // Un disparo por llamada; cola corta para que la ráfaga no empaste.
+  def('shot_smg', { d: 0.55, sr: 32000, n: 4, vol: 0.85, max: 6, pv: 0.04, pri: 2.3, gap: 0.025, rms: 0.45, b: function (c, v, out) {
+    const t = 0.002, pre = amp(c, 1);
+    wire(pre, shaper(c, 3), out);
+    wire(nz(c, 'white', t, t + 0.05), flt(c, 'highpass', R(1800, 2600), 0), pe(c, t, 0.0005, 1.2, R(0.025, 0.035)), pre);
+    wire(nz(c, 'white', t, t + 0.12), flt(c, 'bandpass', R(900, 1400), 0.9), pe(c, t, 0.0008, 1.5, R(0.05, 0.07)), pre);
+    const o = osc(c, 'sine', 200, t, t + 0.15);
+    ramp(o.frequency, t, [[0, R(180, 220)], [0.05, R(55, 70)]], true);
+    wire(o, pe(c, t, 0.0015, 1.1, 0.09), pre);
+    clk(c, pre, t + R(0.008, 0.014), R(2800, 3600), 0.22, 0.02);   // cerrojo
+    const lp = flt(c, 'lowpass', 900, 0);
+    ramp(lp.frequency, t, [[0, R(800, 1100)], [0.35, 200]], true);
+    wire(nz(c, 'brown', t, 0.5), lp, pe(c, t + 0.004, 0.008, 0.6, R(0.28, 0.38)), out);
+    wire(pre, amp(c, 0.2), verb(c, 0.45, 3, 0.5), out);
+  } });
+
+  def('melee_swing', { d: 0.45, sr: 22050, n: 3, vol: 0.55, max: 3, pv: 0.1, pri: 1.5, gap: 0.05, b: function (c, v, out) {
+    const d = R(0.2, 0.3), t = 0.005;
+    swish(c, out, t, d, R(450, 700), R(1500, 2400), 1, 1.4, 'pink');
+    swish(c, out, t + 0.01, d * 0.9, R(2500, 3500), R(4500, 6000), 0.25, 0.8, 'white');
+    // masa del arma cortando el aire
+    const g = amp(c, 0);
+    ramp(g.gain, t, [[0, 0], [d * 0.5, 0.6 + 0.3 * (v % 2)], [d, 0]]);
+    wire(nz(c, 'brown', t, t + d + 0.02), flt(c, 'lowpass', 350, 0), g, out);
+  } });
+
+  def('melee_hit', { d: 0.55, sr: 32000, n: 4, vol: 0.85, max: 4, pv: 0.07, pri: 1.6, gap: 0.03, rms: 0.3, b: function (c, v, out) {
+    const pre = amp(c, 1), t = 0.003;
+    wire(pre, shaper(c, 2.2), out);
+    thump(c, pre, t, R(90, 120), 40, 1.3, 0.2);
+    thump(c, pre, t, R(200, 240), 110, 0.6, 0.07);
+    wire(nz(c, 'brown', t, t + 0.2), flt(c, 'lowpass', R(700, 1100), 0), pe(c, t, 0.002, 1.5, 0.11), pre);
+    wire(nz(c, 'white', t, t + 0.06), flt(c, 'bandpass', R(1800, 2600), 1.2), pe(c, t, 0.0006, 0.7, 0.03), pre);
+    if (v % 2 === 0) grains(c, pre, t, t + 0.04, 5, 1500, 4000, 0.4, 0.004, 0.015);   // crujido de hueso
+    // chapoteo húmedo
+    for (let i = 0; i < 2; i++) {
+      const tt = t + 0.006 + i * R(0.025, 0.06), b = flt(c, 'bandpass', 1400, R(4, 6));
+      ramp(b.frequency, tt, [[0, R(1100, 1900)], [0.16, R(220, 380)]], true);
+      wire(nz(c, 'white', tt, tt + 0.3), b, pe(c, tt, 0.004, 2.4 - i * 0.8, R(0.17, 0.26)), pre);
+    }
+    grains(c, out, 0.05, 0.25, 5, 2000, 4500, 0.22, 0.008, 0.025);
+  } });
+
+  def('door_open', { d: 1.5, sr: 22050, n: 3, vol: 0.6, max: 2, pv: 0.06, pri: 1.2, gap: 0.2, b: function (c, v, out) {
+    clk(c, out, 0.01, R(1700, 2300), 0.45, 0.04);   // pestillo
+    thump(c, out, 0.01, 320, 180, 0.3, 0.04);
+    // bisagra y madera que crujen
+    const t = R(0.08, 0.15), d = R(0.7, 1.0), k = R(0.85, 1.15);
+    creak(c, out, t, d, R(28, 40), R(55, 85), 1, [[420 * k, 7, 1], [1050 * k, 9, 0.7], [2300 * k, 10, 0.3]]);
+    if (v !== 1) creak(c, out, t + d * 0.4, d * 0.5, R(60, 80), R(35, 45), 0.5, [[700 * k, 8, 1], [1600 * k, 10, 0.5]]);
+    wire(nz(c, 'pink', t, t + d), flt(c, 'lowpass', 500, 0), pe(c, t, 0.15, 0.25, d), out);
+  } });
+
+  def('door_close', { d: 1.0, sr: 22050, n: 3, vol: 0.75, max: 2, pv: 0.05, pri: 1.3, gap: 0.2, rms: 0.3, b: function (c, v, out) {
+    const pre = amp(c, 1), t = R(0.07, 0.11);
+    wire(pre, shaper(c, 1.8), out);
+    swish(c, out, 0, 0.12, 300, 700, 0.3, 1, 'pink');   // aire que empuja la hoja
+    thump(c, pre, t, R(85, 110), 45, 1.3, 0.25);
+    thump(c, pre, t, R(190, 220), 110, 0.5, 0.08);
+    wire(nz(c, 'white', t, t + 0.25), flt(c, 'bandpass', R(250, 400), 1.5), pe(c, t, 0.002, 1.6, 0.16), pre);
+    ring(c, pre, t, R(170, 200), [1, 2.4, 4.1, 6.3], 0.35, 0.14);   // panel de madera
+    clk(c, pre, t + 0.008, R(1800, 2300), 0.5, 0.04);               // pestillo
+    for (let i = 0; i < 3; i++) clk(c, out, t + R(0.04, 0.16), R(1200, 2400), 0.12, 0.02);   // marco
+    wire(pre, amp(c, 0.2), verb(c, 0.5, 3, 0.4), out);
+  } });
+
+  // Un golpe de zombie contra la puerta por llamada.
+  def('door_bash', { d: 0.9, sr: 22050, n: 4, vol: 0.8, max: 2, pv: 0.06, pri: 1.3, gap: 0.12, rms: 0.3, b: function (c, v, out) {
+    const pre = amp(c, 1), t = 0.004;
+    wire(pre, shaper(c, 2.2), out);
+    thump(c, pre, t, R(70, 95), 38, 1.4, 0.3);
+    thump(c, pre, t, R(170, 200), 95, 0.5, 0.1);
+    wire(nz(c, 'white', t, t + 0.3), flt(c, 'bandpass', R(180, 320), 1.2), pe(c, t, 0.003, 1.8, 0.2), pre);
+    ring(c, pre, t, R(140, 180), [1, 2.3, 3.9], 0.3, 0.18);
+    // marco y bisagras temblando
+    grains(c, out, t + 0.01, t + 0.18, 6, 1200, 3000, 0.2, 0.008, 0.025);
+    for (let i = 0; i < 2 + (v % 2); i++) clk(c, out, t + R(0.03, 0.2), R(1500, 2600), 0.2, 0.025);
+    if (v >= 2) creak(c, out, t + 0.05, R(0.2, 0.3), R(45, 60), R(30, 40), 0.35, [[500, 6, 1], [1200, 8, 0.6]]);
+    wire(pre, amp(c, 0.18), verb(c, 0.5, 3, 0.4), out);
+  } });
+
+  def('door_break', { d: 1.9, sr: 32000, n: 2, vol: 0.9, max: 1, pv: 0.05, pri: 2, gap: 0.3, rms: 0.32, b: function (c, v, out) {
+    const pre = amp(c, 1), t = 0.004;
+    wire(pre, shaper(c, 2.5), out);
+    thump(c, pre, t, R(75, 95), 35, 1.4, 0.35);
+    thump(c, pre, t, 190, 95, 0.5, 0.1);
+    wire(nz(c, 'white', t, t + 0.3), flt(c, 'bandpass', 260, 1.2), pe(c, t, 0.003, 1.6, 0.22), pre);
+    // la madera se astilla: chasquidos encadenados
+    wire(nz(c, 'white', t, t + 0.12), flt(c, 'bandpass', R(1500, 2500), 0.8), pe(c, t, 0.0005, 2.2, 0.07), pre);
+    const s = nz(c, 'white', t, t + 0.6);
+    for (let i = 0; i < 9; i++) {
+      const tt = t + 0.01 + 0.4 * Math.pow(Math.random(), 1.5);
+      wire(s, flt(c, 'bandpass', R(700, 4000), R(1.5, 3)), pe(c, tt, 0.0004, R(0.8, 2), R(0.012, 0.05)), pre);
+    }
+    creak(c, pre, t + 0.02, R(0.25, 0.35), R(70, 100), R(140, 200), 0.6, [[900, 5, 1], [2100, 6, 0.6]]);
+    grains(c, out, t + 0.02, t + 0.55, 18, 1500, 6000, 0.3, 0.005, 0.03);
+    // tablas que caen
+    for (let i = 0; i < 2; i++) {
+      const tt = R(0.4, 0.95);
+      thump(c, out, tt, R(140, 190), 70, 0.5, 0.1);
+      ring(c, out, tt, R(280, 420), [1, 2.7, 5.1], 0.25, 0.1);
+      grains(c, out, tt, tt + 0.08, 4, 1200, 3500, 0.15, 0.008, 0.02);
+    }
+    wire(pre, amp(c, 0.25), verb(c, 0.8, 3, 0.4), out);
+  } });
+
+  def('chest_open', { d: 1.1, sr: 32000, n: 3, vol: 0.6, max: 2, pv: 0.05, pri: 1.4, gap: 0.2, b: function (c, v, out) {
+    if (v === 0) {          // baúl: cerrojo + bisagra
+      clk(c, out, 0.01, R(2200, 2800), 0.6, 0.04);
+      clk(c, out, 0.03, R(1300, 1700), 0.35, 0.03);
+      creak(c, out, R(0.08, 0.12), R(0.45, 0.6), R(55, 75), R(100, 140), 1, [[900, 8, 1], [1900, 10, 0.6], [3300, 12, 0.3]]);
+      thump(c, out, 0.6, 160, 90, 0.25, 0.08);
+    } else if (v === 1) {   // cajón que se desliza y topa
+      scrape(c, out, 0.02, R(0.3, 0.4), R(500, 700), R(900, 1200), 0.35, R(35, 50));
+      wire(nz(c, 'brown', 0.02, 0.42), flt(c, 'lowpass', 400, 0), pe(c, 0.02, 0.1, 0.4, 0.3), out);
+      grains(c, out, 0.05, 0.4, 8, 1500, 4000, 0.15, 0.006, 0.02);   // contenido
+      thump(c, out, 0.44, 200, 110, 0.6, 0.07);
+      clk(c, out, 0.44, 1400, 0.3, 0.03);
+      ring(c, out, 0.44, R(380, 460), [1, 2.6, 4.4], 0.15, 0.08);
+    } else {                // taquilla metálica
+      clk(c, out, 0.01, R(2600, 3200), 0.8, 0.05);
+      ring(c, out, 0.01, R(300, 360), [1, 2.32, 4.05, 6.7, 9.3], 0.35, 0.5);
+      creak(c, out, R(0.07, 0.1), R(0.35, 0.5), R(150, 190), R(230, 280), 0.6, [[1500, 12, 1], [2600, 14, 0.5]]);
+    }
+  } });
+
+  def('chest_alarm', { d: 2.8, sr: 22050, n: 2, vol: 0.85, max: 1, pv: 0, pri: 2.8, gap: 0.6, rms: 0.3, b: function (c, v, out) {
+    const T = 2.6, pre = amp(c, 1), g = amp(c, 0);
+    if (v === 0) {
+      // sirena que oscila rápido y luego alterna dos tonos
+      const o = osc(c, 'square', 1250, 0, T);
+      wire(osc(c, 'triangle', R(7, 9), 0, 1.3), amp(c, 250), o.frequency);
+      o.frequency.setValueAtTime(1250, 0);
+      for (let t = 1.3, i = 0; t < T; t += 0.16, i++) o.frequency.setValueAtTime(i % 2 ? 950 : 1450, t);
+      o.connect(pre);
+      ramp(g.gain, 0, [[0, 0], [0.01, 1], [T - 0.03, 1], [T, 0]]);
+    } else {
+      // pitidos rápidos y disonantes
+      wire(osc(c, 'square', 2400, 0, T), amp(c, 0.7), pre);
+      wire(osc(c, 'square', 3150, 0, T), amp(c, 0.4), pre);
+      g.gain.setValueAtTime(0, 0);
+      for (let t = 0.01; t < T - 0.1; t += 0.13) {
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(1, t + 0.004);
+        g.gain.setValueAtTime(1, t + 0.075);
+        g.gain.linearRampToValueAtTime(0, t + 0.08);
+      }
+    }
+    // altavoz pequeño y saturado
+    wire(pre, shaper(c, 2), flt(c, 'bandpass', 2200, 0.6), g, out);
+    wire(g, amp(c, 0.15), verb(c, 0.6, 3, 0.5), out);
+  } });
+
+  def('trap_trigger', { d: 0.8, sr: 32000, n: 3, vol: 0.8, max: 3, pv: 0.05, pri: 1.8, gap: 0.1, rms: 0.32, b: function (c, v, out) {
+    const pre = amp(c, 1);
+    wire(pre, shaper(c, 2.5), out);
+    // chasquido del resorte y las mandíbulas
+    clk(c, pre, 0.004, R(2600, 3400), 1.2, 0.05);
+    clk(c, pre, 0.007, R(1100, 1500), 0.6, 0.04);
+    thump(c, pre, 0.004, 260, 130, 0.5, 0.05);
+    // el resorte vibra
+    const f = R(320, 460), o = osc(c, 'triangle', f, 0.006, 0.5);
+    wire(osc(c, 'sine', R(18, 26), 0.006, 0.5), amp(c, f * 0.04), o.frequency);
+    wire(o, pe(c, 0.006, 0.001, 0.35, 0.4), out);
+    ring(c, out, 0.006, f * 2.1, [1, 2.7, 4.9], 0.15, 0.3);
+    // pequeño estallido
+    const t = R(0.03, 0.06);
+    wire(nz(c, 'white', t, t + 0.04), flt(c, 'highpass', 2000, 0), pe(c, t, 0.0004, 1, 0.025), pre);
+    wire(nz(c, 'white', t, t + 0.12), flt(c, 'bandpass', R(700, 1100), 0.8), pe(c, t, 0.0008, 1.5, 0.08), pre);
+    thump(c, pre, t, R(150, 180), 50, 1.1, 0.13);
+    wire(pre, amp(c, 0.2), verb(c, 0.6, 3, 0.5), out);
+  } });
+
+  def('pickup', { d: 0.4, sr: 32000, n: 3, vol: 0.55, max: 2, pv: 0.06, pri: 2, gap: 0.06, b: function (c, v, out) {
+    swish(c, out, 0, R(0.08, 0.11), R(1200, 1600), R(2400, 3200), 0.6, 1.2, 'pink');   // roce al agarrar
+    const t = R(0.05, 0.07), f = R(300, 340);
+    clk(c, out, t, R(1400, 2200), 0.4, 0.03);
+    thump(c, out, t, 340, 190, 0.5, 0.06);
+    // tono hueco y grave que confirma (madera, no electrónico)
+    wire(osc(c, 'sine', f, t, t + 0.25), pe(c, t, 0.002, 0.35, 0.18), out);
+    wire(osc(c, 'sine', f * 1.5, t + 0.05, t + 0.3), pe(c, t + 0.05, 0.002, 0.3, 0.2), out);
+    wire(osc(c, 'sine', f * 3.01, t + 0.05, t + 0.15), pe(c, t + 0.05, 0.001, 0.08, 0.06), out);
+  } });
+
+  def('eat', { d: 1.3, sr: 22050, n: 2, vol: 0.55, max: 1, pv: 0.06, pri: 1.6, gap: 0.3, b: function (c, v, out) {
+    let t = 0.03;
+    for (let i = 0; i < 4; i++) {
+      // crujido + chasquido húmedo + mandíbula
+      if (v === 0 || i === 0) grains(c, out, t, t + 0.07, R(5, 9) | 0, 1200, 4500, 0.3, 0.004, 0.02);
+      const b = flt(c, 'bandpass', 700, 2);
+      ramp(b.frequency, t, [[0, R(700, 1100)], [0.1, R(350, 500)]], true);
+      wire(nz(c, 'pink', t, t + 0.15), b, pe(c, t + 0.01, 0.015, v ? 1 : 0.6, 0.1), out);
+      thump(c, out, t, 150, 80, 0.3, 0.05);
+      t += R(0.24, 0.3);
+    }
+  } });
+
+  def('drink', { d: 1.3, sr: 22050, n: 2, vol: 0.55, max: 1, pv: 0.05, pri: 1.6, gap: 0.3, b: function (c, v, out) {
+    // líquido que se mueve en la botella
+    const am = amp(c, 0.5);
+    wire(osc(c, 'sine', R(5, 7), 0, 1.2), amp(c, 0.5), am.gain);
+    wire(nz(c, 'pink', 0, 1.2), flt(c, 'bandpass', R(1000, 1400), 1.5), am, pe(c, 0, 0.1, 0.25, 1.0), out);
+    let t = 0.1;
+    for (let i = 0; i < 3; i++) {
+      // trago: garganta + burbuja ascendente
+      thump(c, out, t, R(170, 200), 90, 0.6, 0.08);
+      bubble(c, out, t + 0.01, R(240, 320), R(600, 850), R(0.04, 0.06), 0.5);
+      if (v) bubble(c, out, t + R(0.08, 0.12), R(400, 500), R(900, 1200), 0.035, 0.25);
+      wire(nz(c, 'white', t, t + 0.12), flt(c, 'bandpass', 700, 3), pe(c, t, 0.004, 0.5, 0.08), out);
+      t += R(0.3, 0.38);
+    }
+  } });
+
+  def('bandage', { d: 1.3, sr: 22050, n: 2, vol: 0.5, max: 1, pv: 0.05, pri: 1.5, gap: 0.3, b: function (c, v, out) {
+    let t = 0.02;
+    if (v === 0) {
+      // tela que se rasga: crepitar denso
+      const d = R(0.3, 0.4), g = amp(c, 0);
+      ramp(g.gain, t, [[0, 0], [0.03, 1], [d * 0.7, 0.8], [d, 0]]);
+      wire(nz(c, 'white', t, t + d + 0.02), flt(c, 'bandpass', R(2000, 3000), 0.7), g, out);
+      grains(c, out, t, t + d, 30, 1500, 6000, 0.3, 0.002, 0.008);
+      t += d + 0.08;
+    }
+    // vueltas de venda
+    for (let i = 0; i < (v ? 3 : 2); i++) {
+      swish(c, out, t, R(0.18, 0.25), R(700, 900), R(1600, 2200), 0.8, 1, 'pink');
+      grains(c, out, t, t + 0.2, 6, 1500, 4000, 0.12, 0.004, 0.012);
+      t += R(0.26, 0.32);
+    }
+  } });
+
+  def('craft', { d: 1.6, sr: 24000, n: 3, vol: 0.6, max: 1, pv: 0.04, pri: 1.5, gap: 0.3, b: function (c, v, out) {
+    const hammer = function (t) {
+      clk(c, out, t, R(1800, 2600), 0.8, 0.05);
+      thump(c, out, t, 260, 140, 0.6, 0.06);
+      ring(c, out, t, R(700, 900), [1, 2.76, 5.4], 0.15, 0.2);
+    };
+    const saw = function (t, d, up) { scrape(c, out, t, d, up ? 1400 : 2400, up ? 2400 : 1400, 0.35, R(90, 140)); };
+    const ratchet = function (t, n) {
+      for (let i = 0; i < n; i++) clk(c, out, t + i * R(0.03, 0.04), R(2800, 3400), 0.35, 0.015);
+    };
+    if (v === 0) { hammer(0.03); hammer(R(0.35, 0.42)); saw(0.75, 0.3, 1); saw(1.1, 0.28, 0); }
+    else if (v === 1) { saw(0.02, 0.3, 1); saw(0.36, 0.28, 0); saw(0.7, 0.3, 1); ratchet(1.1, 7); }
+    else { ratchet(0.03, 8); ratchet(0.45, 8); hammer(0.9); hammer(R(1.15, 1.25)); }
+  } });
+
+  def('inv_open', { d: 0.75, sr: 24000, n: 3, vol: 0.5, max: 1, pv: 0.06, pri: 2, gap: 0.15, b: function (c, v, out) {
+    // cremallera: los dientes (tren de pulsos) modulan un ruido agudo
+    const t = 0.01, d = R(0.28, 0.4), r0 = R(160, 220), r1 = R(300, 420);
+    const o = osc(c, 'sawtooth', r0, t, t + d + 0.02);
+    ramp(o.frequency, t, [[0, r0], [d * 0.5, r1], [d, r0 * 0.8]], true);
+    const am = amp(c, 0.15), g = amp(c, 0);
+    wire(o, amp(c, 0.85), am.gain);
+    ramp(g.gain, t, [[0, 0], [0.03, 1], [d * 0.8, 0.85], [d, 0]]);
+    wire(nz(c, 'white', t, t + d + 0.02), flt(c, 'bandpass', R(2500, 3500), 1.1), am, g, out);
+    wire(o, flt(c, 'bandpass', R(1200, 1600), 3), amp(c, 0.25), g);
+    swish(c, out, t + d * 0.8, 0.22, 600, 1300, 0.45, 1, 'pink');   // tela de la mochila
+  } });
+
+  def('explosion', { d: 4.5, sr: 22050, n: 3, vol: 1, max: 2, pv: 0.06, pri: 3, gap: 0.06, rms: 0.42, b: function (c, v, out) {
+    const t = 0.003, pre = amp(c, 1);
+    wire(pre, shaper(c, 3), out);
+    // estampido inicial
+    wire(nz(c, 'white', t, t + 0.2), flt(c, 'highpass', R(1000, 1600), 0), pe(c, t, 0.001, 1.2, R(0.1, 0.15)), pre);
+    // masa de la explosión: ruido que se oscurece
+    const lp = flt(c, 'lowpass', 4000, 0);
+    ramp(lp.frequency, t, [[0, R(3500, 5000)], [0.9, R(250, 350)]], true);
+    wire(nz(c, 'pink', t, t + 1.2), lp, pe(c, t, 0.004, 2, R(0.7, 1)), pre);
+    // banda media-grave: es el "bum" que sí suena en el altavoz del móvil
+    wire(nz(c, 'white', t, t + 0.8), flt(c, 'bandpass', R(280, 420), 0.8), pe(c, t, 0.003, 1.6, R(0.45, 0.6)), pre);
+    // sub + armónicos (el saturador añade más)
+    const o = osc(c, 'sine', 60, t, t + 1.5);
+    ramp(o.frequency, t, [[0, R(55, 68)], [0.7, R(22, 28)]], true);
+    wire(o, pe(c, t, 0.005, 2.2, 1.3), pre);
+    thump(c, pre, t, R(130, 150), 55, 1.1, 0.55);
+    thump(c, pre, t, R(260, 300), 110, 0.6, 0.28);
+    // cola grave larga, sin saturar: caída lenta como un trueno cercano
+    const tail = function (f, pk, tau, t1) {
+      const g = amp(c, 0);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(pk, t + 0.08);
+      g.gain.setTargetAtTime(0, t + 0.1, tau);
+      wire(nz(c, 'brown', t, t1), f, g, out);
+    };
+    const tl = flt(c, 'lowpass', 600, 0);
+    ramp(tl.frequency, t, [[0, 600], [3.5, 90]], true);
+    tail(tl, 1.3, R(0.6, 0.75), 4.4);
+    tail(flt(c, 'bandpass', R(180, 240), 1.2), 0.6, R(0.4, 0.5), 3.2);   // retumbo que llega al altavoz del móvil
+    // escombros que caen
+    grains(c, out, 0.25, 2.0, 18, 800, 4000, 0.14, 0.01, 0.04);
+    for (let i = 0; i < 3; i++) thump(c, out, R(0.5, 1.8), R(180, 260), 80, R(0.15, 0.3), 0.08);
+    wire(pre, amp(c, 0.4), verb(c, 2.5, 2.2, 0.35), out);
+  } });
+
+  def('glass_break', { d: 1.4, sr: 32000, n: 3, vol: 0.75, max: 3, pv: 0.06, pri: 1.7, gap: 0.05, rms: 0.28, b: function (c, v, out) {
+    const t = 0.003;
+    wire(nz(c, 'white', t, t + 0.06), flt(c, 'highpass', R(2500, 3500), 0), pe(c, t, 0.0004, 1.5, 0.04), out);
+    wire(nz(c, 'white', t, t + 0.1), flt(c, 'bandpass', R(1800, 2600), 1), pe(c, t, 0.001, 1, 0.06), out);
+    thump(c, out, t, 420, 200, 0.3, 0.04);
+    // fragmentos que tintinean
+    const n = 14 + ((Math.random() * 7) | 0);
+    for (let i = 0; i < n; i++) {
+      const tt = t + 0.002 + 0.55 * Math.pow(Math.random(), 2), f = R(2200, 8500), dd = R(0.04, 0.22);
+      const lv = R(0.1, 0.35) * (1 - (tt - t) * 1.2);
+      wire(osc(c, 'sine', f, tt, tt + dd + 0.03), pe(c, tt, 0.0005, lv, dd), out);
+      if (f * 2.7 < 14000) wire(osc(c, 'sine', f * 2.7, tt, tt + dd * 0.5 + 0.03), pe(c, tt, 0.0005, lv * 0.4, dd * 0.5), out);
+    }
+    grains(c, out, 0.01, 0.6, 22, 3000, 9000, 0.25, 0.003, 0.015);
+    grains(c, out, 0.35, 1.0, 10, 2500, 7000, 0.12, 0.004, 0.012);   // trozos que rebotan
+  } });
+
+  def('molotov_throw', { d: 1.0, sr: 22050, n: 2, vol: 0.6, max: 2, pv: 0.06, pri: 1.6, gap: 0.15, b: function (c, v, out) {
+    const d = R(0.6, 0.8), t = 0.01, rot = R(7, 11);
+    swish(c, out, 0, 0.18, 500, 1400, 0.5, 1.3, 'pink');   // impulso del brazo
+    // botella girando: silbido modulado por la rotación
+    const am = amp(c, 0.4), g = amp(c, 0);
+    wire(osc(c, 'sine', rot, t, t + d), amp(c, 0.6), am.gain);
+    const b = flt(c, 'bandpass', 900, 2);
+    ramp(b.frequency, t, [[0, R(700, 900)], [d * 0.5, R(1300, 1600)], [d, R(800, 1000)]], true);
+    ramp(g.gain, t, [[0, 0], [0.12, 1], [d * 0.7, 0.8], [d, 0]]);
+    wire(nz(c, 'pink', t, t + d + 0.02), b, am, g, out);
+    // líquido que se agita (a contratiempo) y trapo ardiendo
+    const am2 = amp(c, 0.5);
+    wire(osc(c, 'sine', rot, t + 0.5 / rot, t + d), amp(c, 0.5), am2.gain);
+    wire(nz(c, 'pink', t, t + d + 0.02), flt(c, 'bandpass', R(400, 550), 3), am2, amp(c, 0.6), g);
+    wire(nz(c, 'brown', t, t + d + 0.02), flt(c, 'lowpass', 300, 0), amp(c, 0.5), g);
+  } });
+
+  // Con entrada y salida suaves: se puede repetir solapado.
+  def('fire_burn', { d: 1.7, sr: 22050, n: 3, vol: 0.55, max: 2, pv: 0.08, pri: 1, gap: 0.25, b: function (c, v, out) {
+    const g = amp(c, 0);
+    ramp(g.gain, 0, [[0, 0], [0.2, 1], [1.15, 0.9], [1.6, 0]]);
+    g.connect(out);
+    flames(c, g, 0, 1.62);
+  } });
+
+  def('weapon_break', { d: 1.1, sr: 32000, n: 2, vol: 0.8, max: 2, pv: 0.05, pri: 2, gap: 0.2, rms: 0.3, b: function (c, v, out) {
+    const pre = amp(c, 1), t = 0.003;
+    wire(pre, shaper(c, 2.5), out);
+    wire(nz(c, 'white', t, t + 0.1), flt(c, 'bandpass', R(1500, 2500), 0.8), pe(c, t, 0.0004, 2, 0.05), pre);
+    thump(c, pre, t, R(160, 200), 80, 0.7, 0.08);
+    if (v === 0) {
+      // madera que se parte: astillas
+      grains(c, pre, t, t + 0.15, 12, 1200, 5000, 0.35, 0.004, 0.02);
+      creak(c, pre, t, 0.12, R(90, 120), R(160, 200), 0.4, [[1000, 5, 1], [2300, 6, 0.5]]);
+    } else {
+      // metal que se quiebra: resonancia inarmónica
+      clk(c, pre, t, R(2800, 3400), 1, 0.05);
+      ring(c, out, t, R(700, 1000), [1, 2.76, 5.4, 8.9], 0.3, 0.6);
+    }
+    // el trozo cae al suelo y rebota
+    const tt = R(0.35, 0.5);
+    if (v === 0) { thump(c, out, tt, 220, 120, 0.3, 0.06); ring(c, out, tt, R(450, 600), [1, 2.7, 5.2], 0.15, 0.08); }
+    else { clk(c, out, tt, R(2000, 2600), 0.5, 0.04); ring(c, out, tt, R(900, 1200), [1, 2.76, 5.4], 0.15, 0.3); }
+    clk(c, out, tt + R(0.1, 0.16), R(1800, 2400), 0.2, 0.03);
+  } });
+
+  def('hunger_stomach', { d: 1.9, sr: 16000, n: 2, vol: 0.4, max: 1, pv: 0.08, pri: 1.2, gap: 1, b: function (c, v, out) {
+    const d = R(1.2, 1.6), f = R(70, 95);
+    voice(c, out, { d: d, f0: [[0, f], [d * 0.3, f * 1.6], [d * 0.6, f * 0.9], [d, f * 1.3]],
+      amp: [[0.15, 0.5], [d * 0.3, 0.9], [d * 0.5, 0.3], [d * 0.75, 0.8], [d, 0]],
+      F: [[gl(280, 420, d), 3, 1], [gl(650, 800, d), 4, 0.35]],
+      fry: [[0, R(9, 14)], [d, R(5, 8)]], fryD: 0.85, jit: 0.25, wet: 60, breath: 0.08, bn: 'brown',
+      drive: 1.5, body: 0.5, bodyF: 260 });
+    // burbujas de gases
+    for (let i = 0; i < 4 + v * 2; i++) bubble(c, out, R(0.1, d), R(140, 200), R(300, 480), R(0.03, 0.06), R(0.15, 0.3));
   } });
 
   // --- Solo para el ambiente ---
@@ -730,7 +1244,10 @@
         const i = Math.round(t * 2);
         wire(osc(c, 'sawtooth', 55, t, t + 0.32), flt(c, 'lowpass', 280, 2), pe(c, t, 0.006, i % 4 === 0 ? 1 : 0.5, 0.3), out);
       }
-    } }
+    } },
+
+    // Fuego cercano (molotov, fogata) para setFire; mono para ahorrar memoria.
+    fire: { L: 6, F: 1, sr: 16000, ch: 1, lin: false, b: function (c, T, out) { flames(c, out, 0, T); } }
   };
 
   // =====================================================================
@@ -832,7 +1349,7 @@
   function loopJob(key) {
     return function () {
       const L = LOOPS[key], T = L.L + L.F + 0.05;
-      return render(2, T, L.sr, function (c) { L.b(c, T, c.destination); }).then(function (buf) {
+      return render(L.ch || 2, T, L.sr, function (c) { L.b(c, T, c.destination); }).then(function (buf) {
         const out = makeLoop(buf, L.L, L.F, L.lin);
         if (out) startLayer(key, out);
       });
@@ -841,10 +1358,13 @@
 
   // Primero una variación de cada sonido (por importancia), luego el resto.
   function buildJobs() {
-    const order = ['shot_pistol', 'footstep', 'zombie_groan', 'hit_flesh', 'zombie_attack', 'empty_click', 'reload',
-      'shove', 'bullet_wall', 'ui_click', 'player_hurt', 'zombie_death', 'flashlight', '@wind', 'ui_notify',
-      'heartbeat', 'stalker_hiss', 'scream', 'tank_roar', 'tank_stomp', 'tank_charge', 'player_death', '@drone',
-      '@rain', 'thunder', 'amb_crow', 'amb_howl', 'amb_pad', 'amb_bell', '@tension'];
+    const order = ['shot_pistol', 'shot_shotgun', 'shot_rifle', 'shot_smg', 'footstep', 'zombie_groan', 'hit_flesh',
+      'melee_swing', 'melee_hit', 'zombie_attack', 'empty_click', 'reload', 'shove', 'bullet_wall', 'ui_click',
+      'pickup', 'player_hurt', 'zombie_death', 'door_open', 'door_close', 'flashlight', 'inv_open', '@wind',
+      'ui_notify', 'chest_open', 'door_bash', 'door_break', 'trap_trigger', 'explosion', 'glass_break',
+      'molotov_throw', 'fire_burn', '@fire', 'weapon_break', 'heartbeat', 'stalker_hiss', 'scream', 'tank_roar',
+      'tank_stomp', 'tank_charge', 'eat', 'drink', 'bandage', 'craft', 'chest_alarm', 'player_death', '@drone',
+      '@rain', 'thunder', 'hunger_stomach', 'amb_crow', 'amb_howl', 'amb_pad', 'amb_bell', '@tension'];
     const jobs = [];
     for (let pass = 0; pass < 2; pass++) {
       for (let i = 0; i < order.length; i++) {
@@ -884,7 +1404,7 @@
   function buildGraph() {
     master = ctx.createGain();
     master.gain.value = A.muted ? 0 : MASTER;
-    const comp = ctx.createDynamicsCompressor();
+    comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -12;
     comp.knee.value = 10;
     comp.ratio.value = 4;
@@ -897,16 +1417,41 @@
     ambBus = ctx.createGain();
     ambBus.gain.value = 0.9;
     ambBus.connect(comp);
-    const names = ['wind', 'rain', 'drone', 'tension', 'music'];
+    // exterior (viento, lluvia, truenos, lejanos): paso-bajo que se cierra al entrar a un edificio
+    wxLp = ctx.createBiquadFilter();
+    wxLp.type = 'lowpass';
+    wxLp.frequency.value = Math.min(WX_OPEN, ctx.sampleRate * 0.45);
+    wxLp.Q.value = -3;   // sin resonancia (Butterworth)
+    wxLp.connect(ambBus);
+    applied.indoor = 0;
+    // sala de interior: envío desde los efectos a una convolución corta (silenciosa si indoor = 0)
+    roomIn = ctx.createGain();
+    roomIn.gain.value = 0;
+    try {
+      const cv = ctx.createConvolver();
+      cv.normalize = false;
+      cv.buffer = roomIR(ctx.sampleRate);
+      sfxBus.connect(roomIn);
+      roomIn.connect(cv);
+      cv.connect(comp);
+    } catch (e) { /* sin sala */ }
+    const names = ['wind', 'rain', 'drone', 'tension', 'music', 'fire'];
     for (let i = 0; i < names.length; i++) {
       const g = ctx.createGain();
       g.gain.value = 0;
-      g.connect(ambBus);
+      if (i < 5) g.connect(i < 2 ? wxLp : ambBus);
       layers[names[i]] = g;
       applied[names[i]] = -1;
     }
     layers.wind.gain.value = 0.3;   // viento de fondo aunque aún no llamen a setAmbience (menú)
     applied.wind = 0.3;
+    // fuego cercano: va a efectos (recibe sala); el filtro se abre con la intensidad
+    fireLp = ctx.createBiquadFilter();
+    fireLp.type = 'lowpass';
+    fireLp.frequency.value = 1500;
+    layers.fire.connect(fireLp);
+    fireLp.connect(sfxBus);
+    applied.fire = 0;
     // sonidos lejanos: apagados (paso-bajo) y con eco
     distIn = ctx.createGain();
     const lp = ctx.createBiquadFilter();
@@ -919,12 +1464,12 @@
     const wet = ctx.createGain();
     wet.gain.value = 0.55;
     distIn.connect(lp);
-    lp.connect(ambBus);
+    lp.connect(wxLp);
     lp.connect(dl);
     dl.connect(fb);
     fb.connect(dl);
     dl.connect(wet);
-    wet.connect(ambBus);
+    wet.connect(wxLp);
   }
 
   function startLayer(key, buf) {
@@ -1044,7 +1589,7 @@
       if (!ctx || A.muted || ctx.state !== 'running') return false;
       const d = S[name], set = bank[name];
       if (!d || !set || !set.length) return false;
-      let vol = d.vol, pan = 0, cut = 0;
+      let vol = d.vol, pan = 0, cut = 0, dest = sfxBus;
       if (opts && typeof opts.volume === 'number') vol *= opts.volume;
       if (typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y)) {
         const dx = x - lx, dy = y - ly, dist = Math.sqrt(dx * dx + dy * dy);
@@ -1053,7 +1598,8 @@
         vol *= a * a;
         pan = (dx < -PAN_W ? -1 : dx > PAN_W ? 1 : dx / PAN_W) * 0.85;
         if (t > 0.2) cut = 900 + 16000 * a * a * a;   // lo lejano suena apagado
-      }
+      } else if (d.wx) { dest = wxLp; vol /= 0.9; }   // trueno: se amortigua bajo techo (ambBus = 0.9)
+      if (d.dry) dest = comp;                          // interfaz: sin sala
       if (vol < 0.008) return false;
       if (vol > 2) vol = 2;
       const now = ctx.currentTime;
@@ -1097,7 +1643,7 @@
         tail.connect(p);
         tail = p;
       }
-      tail.connect(sfxBus);
+      tail.connect(dest);
       const vo = { n: name, s: s, g: g, f: f, p: p, t: now, e: now + buf.duration / rate, w: prio };
       voices.push(vo);
       s.onended = function () { ended(vo); };
@@ -1139,15 +1685,45 @@
     layers[k].gain.setTargetAtTime(v, now, tau);
   }
 
+  // Transición suave; al ir a 0 fija 0 exacto después, para que el grafo quede en silencio
+  // (así la convolución y los filtros detrás dejan de procesar).
+  function glide(p, v, tau, now) {
+    p.cancelScheduledValues(now);
+    p.setTargetAtTime(v, now, tau);
+    if (v === 0) p.setValueAtTime(0, now + tau * 8);
+  }
+
+  // Interior: cierra el paso-bajo de exterior y abre el envío a la sala.
+  function applyIndoor(now) {
+    const v = amb.indoor;
+    if (Math.abs(v - applied.indoor) < 0.004 && !(v === 0 && applied.indoor !== 0)) return;
+    applied.indoor = v;
+    const f = Math.min(WX_OPEN, ctx.sampleRate * 0.45) * Math.pow(WX_SHUT / WX_OPEN, v);
+    wxLp.frequency.setTargetAtTime(f, now, 0.35);
+    glide(roomIn.gain, ROOM_SEND * v, 0.35, now);
+  }
+
+  // Bucle de fuego cercano: volumen y brillo según la intensidad.
+  function applyFire(now) {
+    const v = fireLvl;
+    if (Math.abs(v - applied.fire) < 0.01 && !(v === 0 && applied.fire !== 0)) return;
+    applied.fire = v;
+    glide(layers.fire.gain, 0.9 * Math.pow(v, 0.8), 0.25, now);
+    fireLp.frequency.setTargetAtTime(1200 + 6800 * v, now, 0.25);
+  }
+
   const PAD_ST = [-12, -7, -5, 0, 0, 1, 3, 5, 7];   // La frigio, registro grave
   const BELL_ST = [0, 1, 3, 7, 8, 12, -5];
 
   function tickAmbience(now) {
     const s = amb, dead = s.health <= 0.001;
     const combat = dead ? 0 : s.combat;
-    // capas en bucle
-    lvl('wind', 0.3 + 0.25 * s.rain + 0.08 * s.night, 2, now);
-    lvl('rain', 0.8 * Math.pow(s.rain, 1.3), 1.5, now);
+    // capas en bucle (bajo techo el viento y la lluvia bajan y se apagan)
+    const ind = s.indoor;
+    lvl('wind', (0.3 + 0.25 * s.rain + 0.08 * s.night) * (1 - 0.6 * ind), 2, now);
+    lvl('rain', 0.8 * Math.pow(s.rain, 1.3) * (1 - 0.45 * ind), 1.5, now);
+    applyIndoor(now);
+    applyFire(now);
     lvl('drone', 0.5 * s.night + 0.12 * s.danger, 3, now);
     const mus = dead ? 0.15 : clamp01(0.5 * s.danger + 0.7 * combat);
     lvl('music', 0.4 * mus, 2.5, now);
@@ -1159,7 +1735,7 @@
       const k = h / 0.3;
       if (beatT < now) beatT = now + 0.05;
       if (beatT - now < 0.2) {
-        fire('heartbeat', beatT, (0.45 + 0.55 * (1 - k)) * S.heartbeat.vol, 1, 0, sfxBus);
+        fire('heartbeat', beatT, (0.45 + 0.55 * (1 - k)) * S.heartbeat.vol, 1, 0, comp);   // interno: sin sala
         beatT += 0.5 + 0.6 * k;
       }
     } else beatT = 0;
@@ -1221,12 +1797,22 @@
         amb.danger = num(o.danger, amb.danger);
         amb.combat = num(o.combat, amb.combat);
         amb.health = num(o.health, amb.health);
+        amb.indoor = num(o.indoor, amb.indoor);
       }
       if (!ctx || A.muted || ctx.state !== 'running') return;
       const now = ctx.currentTime;
       if (now - ambT < 0.1) return;   // ~10 veces por segundo es suficiente
       ambT = now;
       tickAmbience(now);
+    } catch (e) { /* nada */ }
+  }
+
+  // Fuego cercano 0..1 (molotov, fogata); 0 lo silencia. Se puede llamar cada frame.
+  function setFire(i) {
+    try {
+      fireLvl = num(i, 0);
+      if (!ctx || A.muted || ctx.state !== 'running') return;
+      applyFire(ctx.currentTime);
     } catch (e) { /* nada */ }
   }
 

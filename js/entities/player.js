@@ -1,4 +1,5 @@
-// Jugador: movimiento, estamina, vida, animación y dibujo.
+// Jugador: movimiento, estamina, vida, necesidades (hambre/sed), estados (sangrado, infección,
+// analgésicos), uso de objetos con tiempo, animación y dibujo según el arma.
 (function () {
   const U = TM.U;
 
@@ -6,6 +7,18 @@
   const SPRINT_SPEED = 208;
   const STAMINA_DRAIN = 24;
   const STAMINA_REGEN = 20;
+
+  // Necesidades: con actividad normal un día (480 s) baja ~65 de hambre y ~80 de sed → comer y beber ~2 veces.
+  const HUNGER_RATE = 0.14;   // por segundo caminando
+  const THIRST_RATE = 0.17;
+  const STARVE_DPS = 0.45;    // vida por segundo con hambre 0
+  const DEHYD_DPS = 0.65;     // vida por segundo con sed 0
+  const BLEED_DPS = 0.45;
+  const BLEED_TIME = 40;      // el sangrado se corta solo pasado este tiempo
+  const INFECT_CHANCE = 0.035;// por golpe de zombie
+  const INFECT_TIME = 300;    // segundos hasta infección máxima
+  const REGEN_FED = 0.1;      // vida/s bien alimentado (antes 1,5)
+  const REGEN_CAMP = 0.8;     // vida/s junto a la fogata
 
   class Player {
     constructor(name) {
@@ -32,25 +45,57 @@
       this.stepAcc = 0;
       this.recoil = 0;
       this.shoveAnim = 0;
+      this.swingAnim = 0;
+      this.swingDir = 1;
+      this.swapAnim = 0;
+      this.weaponId = 'pistol';
       this.deathTime = 0;
       this.maxDist = 0;
+      // Fase 2
+      this.hunger = 85;               // 100 = saciado
+      this.thirst = 80;
+      this.bleedT = 0;                // segundos de sangrado restantes
+      this.infection = 0;             // 0..1
+      this.painT = 0;                 // analgésicos activos (s)
+      this.action = null;             // uso de un objeto en curso
+      this._warn = {};
+      this.inventory = TM.Inventory ? new TM.Inventory() : null;
+      if (this.inventory) this.inventory.giveStarter();
+    }
+
+    get bleeding() { return this.bleedT > 0; }
+    get infected() { return this.infection > 0; }
+
+    serializeStatus() {
+      return { b: +this.bleedT.toFixed(1), i: +this.infection.toFixed(3), p: +this.painT.toFixed(1) };
+    }
+    deserializeStatus(d) {
+      if (!d) return;
+      if (Number.isFinite(d.b)) this.bleedT = U.clamp(d.b, 0, BLEED_TIME);
+      if (Number.isFinite(d.i)) this.infection = U.clamp(d.i, 0, 1);
+      if (Number.isFinite(d.p)) this.painT = U.clamp(d.p, 0, 120);
     }
 
     update(dt, game) {
       const In = TM.Input;
       if (!this.alive) {
         this.vx *= 0.9; this.vy *= 0.9;
+        this.action = null;
         return;
       }
+      const inv = this.inventory;
       // --- Movimiento ---
       const mv = In.move;
-      const wantsSprint = mv.sprint && mv.mag > 0.5 && this.stamina > 2 && !game.combat.reloading;
+      const canRun = !game.combat.reloading && !this.action && (!inv || inv.canSprint());
+      const wantsSprint = mv.sprint && mv.mag > 0.5 && this.stamina > 2 && canRun;
       this.sprinting = wantsSprint && (this.sprinting || this.stamina > 15);
       let speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * mv.mag;
       if (In.aim.active && !this.sprinting) speed *= 0.86;
       if (game.combat.reloading) speed *= 0.9;
-      // herido grave: más lento
-      if (this.hp < 25) speed *= 0.9;
+      if (this.action) speed *= 0.55;
+      if (inv) speed *= inv.speedFactor();
+      // herido grave: más lento (los analgésicos lo evitan)
+      if (this.hp < 25 && this.painT <= 0) speed *= 0.9;
       const tvx = mv.x * speed, tvy = mv.y * speed;
       const acc = mv.mag > 0 ? 14 : 10;
       this.vx += (tvx - this.vx) * Math.min(1, acc * dt);
@@ -63,13 +108,16 @@
       const sp = Math.hypot(this.vx, this.vy);
       this.moving = sp > 20;
 
-      // --- Estamina ---
+      // --- Estamina (la infección y el hambre/sed la recuperan peor) ---
+      let regen = STAMINA_REGEN;
+      if (this.infection > 0.25) regen *= 0.6;
+      if (this.hunger < 15 || this.thirst < 15) regen *= 0.65;
       if (this.sprinting && this.moving) {
-        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * dt);
+        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * (inv && inv.load() > 1 ? 1.4 : 1) * dt);
         this.staminaDelay = 0.7;
         if (this.stamina <= 0) this.sprinting = false;
       } else if (this.staminaDelay > 0) this.staminaDelay -= dt;
-      else this.stamina = Math.min(this.maxStamina, this.stamina + STAMINA_REGEN * dt);
+      else this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
 
       // --- Apuntado y orientación ---
       if (In.aim.active) {
@@ -98,21 +146,145 @@
         }
       }
 
-      // --- Regeneración ---
-      const sinceHit = game.time - this.lastDamageTime;
-      const inCamp = Math.hypot(this.x, this.y) < TM.Config.SAFE_RADIUS;
-      if (inCamp && sinceHit > 4) this.hp = Math.min(this.maxHp, this.hp + 4 * dt);
-      else if (sinceHit > 9 && this.hp < this.maxHp * 0.6) this.hp = Math.min(this.maxHp * 0.6, this.hp + 1.5 * dt);
+      this.updateNeeds(dt, game);
+      this.updateAction(dt, game);
 
       this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4);
       this.recoil = Math.max(0, this.recoil - dt * 10);
       this.shoveAnim = Math.max(0, this.shoveAnim - dt * 4);
+      this.swingAnim = Math.max(0, this.swingAnim - dt * 4.5);
+      this.swapAnim = Math.max(0, this.swapAnim - dt * 3);
       this.maxDist = Math.max(this.maxDist, Math.hypot(this.x, this.y));
+    }
+
+    // ---------- necesidades y estados ----------
+    updateNeeds(dt, game) {
+      const act = this.sprinting && this.moving ? 1.7 : this.moving ? 1 : 0.7;
+      const biome = game.world.biomeAt ? game.world.biomeAt(this.x, this.y) : '';
+      const heat = biome === 'desert' && !game.isNight ? 1.35 : 1;
+      this.hunger = Math.max(0, this.hunger - HUNGER_RATE * act * dt);
+      this.thirst = Math.max(0, this.thirst - THIRST_RATE * act * heat * dt);
+
+      if (this.hunger <= 0) this.loseHp(STARVE_DPS * dt, 'hambre');
+      if (this.thirst <= 0) this.loseHp(DEHYD_DPS * dt, 'sed');
+      this.warnNeed(game, 'hunger', this.hunger, ['Tienes hambre', 'Te mueres de hambre: come algo', 'Te estás muriendo de hambre']);
+      this.warnNeed(game, 'thirst', this.thirst, ['Tienes sed', 'Te mueres de sed: bebe algo', 'Te estás deshidratando']);
+
+      // sangrado
+      if (this.bleedT > 0) {
+        this.bleedT -= dt;
+        this.loseHp(BLEED_DPS * dt, 'sangrado');
+        this._drip = (this._drip || 0) - dt;
+        if (this._drip <= 0) {
+          this._drip = U.randRange(0.5, 0.9);
+          game.fx.blood(this.x, this.y, U.randRange(-1, 1), U.randRange(-1, 1), 2);
+          if (U.chance(0.4)) game.world.paintBlood(this.x + U.randRange(-5, 5), this.y + U.randRange(-5, 5), 2.5, 0.5);
+        }
+        if (this.bleedT <= 0) game.notify('La herida dejó de sangrar', '#c0a080');
+      }
+      // infección: bien alimentado, al principio el cuerpo la vence
+      if (this.infection > 0) {
+        const fed = this.hunger > 60 && this.thirst > 60;
+        if (fed && this.infection < 0.25) {
+          this.infection -= dt / 220;
+          if (this.infection <= 0) { this.infection = 0; game.notify('Tu cuerpo venció la infección', '#8fc870'); }
+        } else {
+          this.infection = Math.min(1, this.infection + dt / INFECT_TIME * (fed ? 0.6 : 1));
+          if (this.infection >= 0.25) this.loseHp(0.14 * this.infection * dt, 'infeccion');
+          if (this.infection >= 0.25 && !this._warn.inf) { this._warn.inf = true; game.notify('La infección avanza: necesitas antibióticos', '#90c060'); }
+        }
+      }
+      if (this.painT > 0) this.painT -= dt;
+
+      // regeneración: mucho más lenta que en la Fase 1; la fogata del campamento cura despacio
+      const sinceHit = game.time - this.lastDamageTime;
+      const inCamp = Math.hypot(this.x, this.y) < TM.Config.SAFE_RADIUS;
+      const starving = this.hunger <= 0 || this.thirst <= 0;
+      if (inCamp && sinceHit > 4 && !starving) this.hp = Math.min(this.maxHp, this.hp + REGEN_CAMP * dt);
+      else if (sinceHit > 12 && this.hunger > 50 && this.thirst > 50 && this.bleedT <= 0 && this.infection < 0.25) {
+        this.hp = Math.min(this.maxHp, this.hp + REGEN_FED * dt);
+      }
+    }
+
+    warnNeed(game, key, v, msgs) {
+      const lv = v <= 0 ? 3 : v < 12 ? 2 : v < 30 ? 1 : 0;
+      const prev = this._warn[key] || 0;
+      if (lv > prev) game.notify(msgs[lv - 1], key === 'thirst' ? '#80b0e0' : '#d0a060');
+      this._warn[key] = lv;
+    }
+
+    // Pérdida de vida sin efectos de golpe (hambre, sed, sangrado, infección)
+    loseHp(amount, kind) {
+      if (!this.alive || amount <= 0) return;
+      this.hp -= amount;
+      if (this.hp <= 0) this.die(kind);
+    }
+
+    die(kind) {
+      const g = TM.game;
+      this.hp = 0;
+      this.alive = false;
+      this.deathTime = g.time;
+      this.action = null;
+      if (TM.Audio) TM.Audio.play('player_death', this.x, this.y);
+      g.world.paintBlood(this.x, this.y, 16, 0.85);
+      if (TM.InvUI) TM.InvUI.closeAll();
+      g.onPlayerDeath(kind);
+    }
+
+    // ---------- uso de objetos (tarda un poco: no se puede atacar mientras tanto) ----------
+    startUse(stack) {
+      const g = TM.game, d = TM.Items.DB[stack.id];
+      if (!d || !this.alive) return false;
+      if (this.action) {
+        // tocar otra vez el mismo acceso rápido cancela
+        if (this.action.stack === stack || this.action.id === stack.id) { this.action = null; g.fx.floatText(this.x, this.y - 24, 'Cancelado', '#b0a090'); }
+        return false;
+      }
+      // evitar desperdiciar
+      let why = '';
+      if (d.cat === 'med') {
+        const useful = this.hp < this.maxHp - 2 || (d.stopBleed && this.bleedT > 0) || (d.cureInf && this.infection > 0) || (d.pain && this.painT <= 0);
+        if (!useful) why = 'No lo necesitas';
+      } else if (d.cat === 'food' && this.hunger > 96 && !(d.water > 0 && this.thirst < 90)) why = 'Estás lleno';
+      else if (d.cat === 'drink' && this.thirst > 96) why = 'No tienes sed';
+      if (why) { g.fx.floatText(this.x, this.y - 24, why, '#b0a090'); return false; }
+      this.action = { id: d.id, stack, t: 0, dur: d.useTime || 1, cat: d.cat };
+      const snd = d.cat === 'med' ? 'bandage' : d.cat === 'drink' ? 'drink' : 'eat';
+      if (TM.Audio) TM.Audio.play(snd, this.x, this.y);
+      if (g.combat) { g.combat.reloading = false; }
+      return true;
+    }
+
+    updateAction(dt, game) {
+      const a = this.action;
+      if (!a) return;
+      const inv = this.inventory;
+      if (!inv || inv.slots.indexOf(a.stack) < 0) { this.action = null; return; }
+      a.t += dt;
+      if (a.t < a.dur) return;
+      this.action = null;
+      const d = TM.Items.DB[a.id];
+      inv.removeStack(a.stack, 1);
+      const parts = [];
+      if (d.food) { this.hunger = U.clamp(this.hunger + d.food, 0, 100); parts.push(`+${d.food} comida`); }
+      if (d.water) { this.thirst = U.clamp(this.thirst + d.water, 0, 100); if (d.water > 0) parts.push(`+${d.water} agua`); }
+      if (d.stam) this.stamina = Math.min(this.maxStamina, this.stamina + d.stam);
+      if (d.heal) { const h = Math.min(d.heal, this.maxHp - this.hp); this.hp += h; if (h >= 1) parts.push(`+${Math.round(h)} vida`); }
+      if (d.stopBleed && this.bleedT > 0) { this.bleedT = 0; parts.push('sangrado detenido'); }
+      if (d.cureInf && this.infection > 0) { this.infection = 0; this._warn.inf = false; game.notify('La infección remite', '#8fc870'); }
+      if (d.pain) { this.painT = d.pain; parts.push('sin dolor'); }
+      if (d.leaves) inv.add({ id: d.leaves, qty: 1 });
+      if (this.hunger >= 30) this._warn.hunger = 0;
+      if (this.thirst >= 30) this._warn.thirst = 0;
+      const col = d.cat === 'med' ? '#e07070' : d.cat === 'drink' ? '#80b8e8' : '#d8b070';
+      game.fx.floatText(this.x, this.y - 24, parts.join('  ') || d.name, col);
     }
 
     damage(amount, fromX, fromY, kind) {
       if (!this.alive || amount <= 0) return 0;
       const g = TM.game;
+      if (this.painT > 0) amount *= 0.75;
       this.hp -= amount;
       this.lastDamageTime = g.time;
       this.hurtFlash = 1;
@@ -123,12 +295,26 @@
       if (U.chance(0.5)) g.world.paintBlood(this.x + U.randRange(-6, 6), this.y + U.randRange(-6, 6), 4, 0.6);
       TM.Input.vibrate(amount > 15 ? 70 : 35);
       if (TM.Audio) TM.Audio.play('player_hurt', this.x, this.y, { volume: 0.8 });
+      // heridas: sangrado (zarpazos, trampas) e infección (mordeduras)
+      if (kind === 'zombie' || kind === 'trap') {
+        const pb = kind === 'trap' ? 0.55 : 0.1 + amount * 0.012;
+        if (U.chance(pb)) {
+          if (this.bleedT <= 0) g.notify('Estás sangrando: usa una venda', '#e06050');
+          this.bleedT = BLEED_TIME;
+        }
+        if (kind === 'zombie' && this.infection <= 0 && U.chance(INFECT_CHANCE)) {
+          this.infection = 0.02;
+          g.notify('La mordedura se ve mal. Come y bebe bien para resistir', '#a0c070');
+        }
+      }
       if (this.hp <= 0) {
         this.hp = 0;
         this.alive = false;
         this.deathTime = g.time;
+        this.action = null;
         if (TM.Audio) TM.Audio.play('player_death', this.x, this.y);
         g.world.paintBlood(this.x, this.y, 16, 0.85);
+        if (TM.InvUI) TM.InvUI.closeAll();
         g.onPlayerDeath(kind);
       }
       return amount;
@@ -163,10 +349,13 @@
       ctx.fillStyle = '#23262a';
       ctx.beginPath(); ctx.ellipse(swing * 7, -5, 5, 3.6, 0, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.ellipse(-swing * 7, 5, 5, 3.6, 0, 0, Math.PI * 2); ctx.fill();
-      // mochila
-      ctx.fillStyle = '#3d3326';
-      ctx.fillRect(-13, -7, 7, 14);
-      ctx.fillStyle = '#2f281e'; ctx.fillRect(-13, -7, 2, 14);
+      // mochila (más grande si lleva una mejor)
+      const pack = this.inventory && this.inventory.pack;
+      const pd = pack && TM.Items.DB[pack];
+      ctx.fillStyle = pd ? pd.color : '#3d3326';
+      const pw = pd ? 7 + Math.min(4, pd.pack / 5) : 7;
+      ctx.fillRect(-6 - pw, -7 - (pw - 7), pw, 14 + (pw - 7) * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(-6 - pw, -7 - (pw - 7), 2, 14 + (pw - 7) * 2);
       // torso (chaqueta)
       const flash = this.hurtFlash;
       ctx.fillStyle = flash > 0.5 ? '#8a3b30' : '#55613f';
@@ -175,19 +364,9 @@
       ctx.strokeStyle = 'rgba(8,8,6,0.75)'; ctx.lineWidth = 1.4; ctx.stroke();
       ctx.fillStyle = 'rgba(255,255,255,0.06)';
       ctx.beginPath(); ctx.ellipse(1, -3, 5, 7, 0, 0, Math.PI * 2); ctx.fill();
-      // brazos sosteniendo la pistola
-      const rec = this.recoil * 4;
-      const sh = this.shoveAnim;
-      ctx.fillStyle = '#3d4632';
-      ctx.beginPath(); ctx.ellipse(6 - rec + sh * 8, -6, 8, 3.2, 0.25, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.ellipse(6 - rec + sh * 8, 6, 8, 3.2, -0.25, 0, Math.PI * 2); ctx.fill();
-      // manos
-      ctx.fillStyle = '#b88a6a';
-      ctx.beginPath(); ctx.arc(13 - rec + sh * 8, -1.5, 2.8, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc(13 - rec + sh * 8, 2, 2.8, 0, Math.PI * 2); ctx.fill();
-      // pistola
-      ctx.fillStyle = '#151618';
-      ctx.fillRect(14 - rec + sh * 8, -1.6, 10, 3.2);
+
+      this.drawArms(ctx);
+
       // cabeza
       ctx.fillStyle = '#c4946f';
       ctx.beginPath(); ctx.arc(1, 0, 6.2, 0, Math.PI * 2); ctx.fill();
@@ -196,6 +375,115 @@
       ctx.beginPath(); ctx.arc(-0.5, 0, 6.2, Math.PI * 0.55, Math.PI * 1.45); ctx.fill();
       ctx.beginPath(); ctx.ellipse(-1.2, 0, 4.6, 5.6, 0, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
+
+      // progreso de uso de un objeto
+      if (this.action) {
+        const k = this.action.t / this.action.dur;
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(x, y, 19, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = this.action.cat === 'med' ? '#e07070' : this.action.cat === 'drink' ? '#80b8e8' : '#d8b070';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(x, y, 19, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k); ctx.stroke();
+      }
+    }
+
+    // Brazos y arma según lo que lleva en la mano
+    drawArms(ctx) {
+      const W = TM.WEAPONS && TM.WEAPONS[this.weaponId];
+      const kind = W ? W.kind : 'gun';
+      const look = W ? W.look : 'pistol';
+      const rec = this.recoil * 4;
+      const sh = this.shoveAnim * 8;
+      const sw = this.swapAnim;
+      const arm = (ax, ay, rot) => { ctx.beginPath(); ctx.ellipse(ax, ay, 8, 3.2, rot, 0, Math.PI * 2); ctx.fill(); };
+      const hand = (hx, hy) => { ctx.beginPath(); ctx.arc(hx, hy, 2.8, 0, Math.PI * 2); ctx.fill(); };
+
+      if (kind === 'gun') {
+        const long = look === 'shotgun' || look === 'rifle' || look === 'smg';
+        const off = -rec + sh - sw * 6;
+        ctx.fillStyle = '#3d4632';
+        arm(6 + off, -6, 0.25); arm((long ? 10 : 6) + off, 6, long ? -0.1 : -0.25);
+        ctx.fillStyle = '#b88a6a';
+        hand(13 + off, -1.5); hand((long ? 20 : 13) + off, 2);
+        if (long) {
+          const L = look === 'rifle' ? 26 : look === 'shotgun' ? 22 : 16;
+          ctx.fillStyle = look === 'smg' ? '#1c1d20' : '#5a3e24';
+          ctx.fillRect(4 + off, -2, 10, 4);
+          ctx.fillStyle = '#151618';
+          ctx.fillRect(12 + off, -1.6, L, 3.2);
+          if (look === 'rifle') { ctx.fillStyle = '#26282c'; ctx.fillRect(14 + off, -3.6, 8, 2); }
+          if (look === 'smg') { ctx.fillStyle = '#151618'; ctx.fillRect(18 + off, 1.6, 3, 5); }
+        } else {
+          ctx.fillStyle = '#151618';
+          ctx.fillRect(14 + off, -1.6, 10, 3.2);
+          if (look === 'pistolsil') { ctx.fillStyle = '#4a5056'; ctx.fillRect(24 + off, -2.2, 7, 4.4); }
+        }
+        return;
+      }
+      if (kind === 'throw') {
+        const k = this.swingAnim;
+        ctx.fillStyle = '#3d4632';
+        arm(4, -6, 0.4); arm(2 - k * 6, 7, -0.6 + k);
+        ctx.fillStyle = '#b88a6a';
+        hand(9, -4); hand(6 + k * 10, 9 - k * 6);
+        if (k < 0.2) TM.Items.drawIcon(ctx, look === 'molotov' ? 'molotov' : look === 'bomb' ? 'pipebomb' : look, 8, 10, 12);
+        return;
+      }
+      // cuerpo a cuerpo
+      if (look === 'fists') {
+        const k = this.swingAnim;
+        const pr = this.swingDir > 0 ? k : 0, pl = this.swingDir < 0 ? k : 0;
+        ctx.fillStyle = '#3d4632';
+        arm(5 + pl * 7 + sh, -6, 0.3); arm(5 + pr * 7 + sh, 6, -0.3);
+        ctx.fillStyle = '#b88a6a';
+        hand(11 + pl * 9 + sh, -5); hand(11 + pr * 9 + sh, 5);
+        return;
+      }
+      const k = this.swingAnim;
+      let ang;
+      if (W.thrust) ang = 0.15;
+      else {
+        // barrido de un lado a otro con aceleración al principio
+        const e = 1 - Math.pow(1 - (1 - k), 3);
+        ang = k > 0 ? this.swingDir * (1.3 - 2.6 * e) : 0.75;
+      }
+      const reach = W.thrust ? k * 14 : 0;
+      ctx.fillStyle = '#3d4632';
+      arm(5 + reach * 0.6, 4, -0.2);
+      arm(4, -5, 0.4);
+      ctx.save();
+      ctx.translate(9 + reach, 3);
+      ctx.rotate(ang);
+      const L = { knife: 12, bat: 26, batn: 26, pipe: 26, machete: 22, axe: 24, club: 24, spear: 40 }[look] || 22;
+      if (look === 'knife' || look === 'machete') {
+        ctx.fillStyle = '#2a2420'; ctx.fillRect(0, -1.5, 6, 3);
+        ctx.fillStyle = '#c8ccd0';
+        ctx.beginPath(); ctx.moveTo(6, -2.2); ctx.lineTo(6 + L, -0.6); ctx.lineTo(6 + L - 2, 1.6); ctx.lineTo(6, 2); ctx.closePath(); ctx.fill();
+      } else if (look === 'axe') {
+        ctx.fillStyle = '#8a6238'; ctx.fillRect(0, -1.5, L, 3);
+        ctx.fillStyle = '#a8aeb4';
+        ctx.beginPath(); ctx.moveTo(L - 6, -1.5); ctx.lineTo(L, -7); ctx.lineTo(L + 2, 0); ctx.lineTo(L, 4); ctx.lineTo(L - 6, 1.5); ctx.closePath(); ctx.fill();
+      } else if (look === 'spear') {
+        ctx.fillStyle = '#8a9098'; ctx.fillRect(-8, -1.4, L, 2.8);
+        ctx.fillStyle = '#d0d4d8';
+        ctx.beginPath(); ctx.moveTo(L - 8, -2.6); ctx.lineTo(L - 1, 0); ctx.lineTo(L - 8, 2.6); ctx.closePath(); ctx.fill();
+      } else if (look === 'pipe') {
+        ctx.fillStyle = '#8a9098'; ctx.fillRect(0, -2, L, 4);
+        ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(2, -1.5, L - 4, 1);
+      } else {
+        // bate / garrote / bate con clavos
+        ctx.fillStyle = look === 'club' ? '#8a6a40' : '#a07848';
+        ctx.beginPath(); ctx.moveTo(0, -1.6); ctx.lineTo(L, -3.2); ctx.lineTo(L, 3.2); ctx.lineTo(0, 1.6); ctx.closePath(); ctx.fill();
+        if (look === 'batn') {
+          ctx.strokeStyle = '#c8ccd0'; ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let i = 0; i < 4; i++) { const px = L - 12 + i * 3.5; ctx.moveTo(px, -3); ctx.lineTo(px + 1, -6); ctx.moveTo(px, 3); ctx.lineTo(px + 1, 6); }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+      ctx.fillStyle = '#b88a6a';
+      hand(9 + reach, 3); hand(6, -3);
     }
   }
 

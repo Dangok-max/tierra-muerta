@@ -70,41 +70,53 @@
       ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
       // --- suelo pre-renderizado ---
+      const W = game.world;
+      W._frameN = this.frame;
       const margin = 40;
-      const vis = game.world.prepareView(cam.x - cam.viewW / 2 - margin, cam.y - cam.viewH / 2 - margin,
+      const t0 = performance.now();
+      const vis = W.prepareView(cam.x - cam.viewW / 2 - margin, cam.y - cam.viewH / 2 - margin,
         cam.x + cam.viewW / 2 + margin, cam.y + cam.viewH / 2 + margin, this.frame, game.bakeBudget);
-      // pre-hornear poco a poco los chunks alrededor de la vista (sin tirones)
-      game.world.prefetch(cam.x - cam.viewW / 2 - 420, cam.y - cam.viewH / 2 - 420,
-        cam.x + cam.viewW / 2 + 420, cam.y + cam.viewH / 2 + 420, this.frame - 1);
+      // pre-generar y hornear poco a poco alrededor de la vista (sin tirones)
+      W.prefetch(cam.x - cam.viewW / 2 - 300, cam.y - cam.viewH / 2 - 300,
+        cam.x + cam.viewW / 2 + 300, cam.y + cam.viewH / 2 + 300, this.frame - 1);
       for (const ch of vis) ch.lastUsed = this.frame;
-      game.world.bakeTick(game.state === 'play' ? 2.5 : 4);
+      W.bakeTick(game.state === 'play' ? TM.Config.preset.genBudget : 5);
+      this.genMs = performance.now() - t0;
+      // techo que se desvanece al entrar
+      const pl = game.player;
+      if (W.updateRoofs) W.updateRoofs(dt || 0, pl.x, pl.y);
 
       this.worldTransform(cam);
       ctx.imageSmoothingEnabled = true;
       for (const ch of vis) {
-        if (ch.ready) ctx.drawImage(ch.canvas, ch.x0, ch.y0, CH + 0.6, CH + 0.6);
+        if (ch.ready && ch.canvas) ctx.drawImage(ch.canvas, ch.x0, ch.y0, CH + 0.6, CH + 0.6);
       }
 
       // --- objetos dinámicos (fuego) ---
       for (const ch of vis) {
         for (const d of ch.dyn) {
           if (d.kind === 'fire') {
-            const f = 0.85 + Math.sin(t * 13) * 0.05 + Math.sin(t * 7.3) * 0.06 + Math.random() * 0.05;
-            game.frameLights.push({ x: d.x, y: d.y, radius: 250 * f, intensity: 0.95 });
+            const f = 0.85 + Math.sin(t * 13 + d.x) * 0.05 + Math.sin(t * 7.3) * 0.06 + Math.random() * 0.05;
+            game.frameLights.push({ x: d.x, y: d.y, radius: (d.small ? 200 : 300) * f, intensity: 0.95 });
             this.drawFire(ctx, d.x, d.y, t);
           }
         }
       }
+      // --- puertas, cofres abiertos y objetos del suelo ---
+      if (W.drawDynamic) W.drawDynamic(ctx, vis, cam, t);
 
       // --- partículas de suelo ---
       game.fx.draw(ctx, cam);
 
-      // --- entidades ordenadas por y (cadáveres primero) ---
+      // --- entidades ordenadas por y (cadáveres primero); las que están bajo un techo opaco no se ven ---
       const list = this.drawList; list.length = 0;
-      for (const z of game.zombies) if (cam.inView(z.x, z.y, 60)) list.push(z);
+      for (const z of game.zombies) if (cam.inView(z.x, z.y, 60) && !(W.roofCovers && W.roofCovers(z.x, z.y))) list.push(z);
       if (game.state !== 'menu') list.push(game.player);
       list.sort((a, b) => ((a.dead ? -1e6 : 0) + a.y) - ((b.dead ? -1e6 : 0) + b.y));
       for (const e of list) e.draw(ctx, t);
+
+      // --- techos (encima de las entidades) ---
+      if (W.drawRoofs) W.drawRoofs(ctx, cam, W.curB ? W.curB.id : null, vis);
 
       // --- niebla, oscuridad y luces (en px CSS) ---
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -118,6 +130,7 @@
       for (const L of game.fx.lights) this.lighting.warmGlow(ctx, L.x, L.y, L.radius * 0.5, 0.35 * L.life / L.max);
       ctx.globalCompositeOperation = 'source-over';
       for (const e of list) if (e.drawGlow) e.drawGlow(ctx, t);
+      void W;
       game.fx.drawGlow(ctx);
       // mira láser al apuntar
       if (game.player.alive && TM.Input.aim.active) this.drawLaser(ctx, game);
@@ -133,16 +146,16 @@
     }
 
     drawFire(ctx, x, y, t) {
-      for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = '#2a1a10';
+      ctx.fillRect(x - 13, y - 3, 26, 6);
+      ctx.fillRect(x - 3, y - 13, 6, 26);
+      for (let i = 0; i < 6; i++) {
         const a = t * 3 + i * 1.3;
-        const r = 5 + Math.sin(a * 2.1) * 1.5;
-        const ox = Math.sin(a) * 3, oy = Math.cos(a * 1.3) * 3 - 2;
+        const r = 7 + Math.sin(a * 2.1) * 2;
+        const ox = Math.sin(a) * 4, oy = Math.cos(a * 1.3) * 4 - 3;
         ctx.fillStyle = i < 2 ? 'rgba(255,120,30,0.85)' : 'rgba(255,200,90,0.8)';
         ctx.beginPath(); ctx.arc(x + ox, y + oy, r * (i < 2 ? 1.4 : 0.8), 0, Math.PI * 2); ctx.fill();
       }
-      ctx.fillStyle = '#2a1a10';
-      ctx.fillRect(x - 9, y - 2, 18, 4);
-      ctx.fillRect(x - 2, y - 9, 4, 18);
     }
 
     drawLaser(ctx, game) {

@@ -131,6 +131,7 @@
       const km = (game.player.maxDist / TM.Config.UNITS_PER_M / 1000).toFixed(2);
       $('goStats').innerHTML =
         `<b>${escapeHtml(game.player.name)}</b> sobrevivió <b>${game.day}</b> día(s).<br>` +
+        `Causa: <b>${CAUSES[game.deathCause] || 'los muertos'}</b><br>` +
         `Zombies eliminados: <b>${game.totalKills()}</b>${byType}<br>` +
         `Distancia máxima: <b>${km} km</b><br>` +
         learned(game) +
@@ -147,6 +148,9 @@
     return '<div style="margin-top:6px;color:#c08070">Los muertos aprendieron de ti:</div>' +
       list.slice(0, 4).map((t) => `<div style="color:#a89c8c">· ${escapeHtml(t)}</div>`).join('');
   }
+
+  const CAUSES = { zombie: 'los muertos', hambre: 'el hambre', sed: 'la sed', sangrado: 'una hemorragia',
+    infeccion: 'la infección', explosion: 'una explosión', fire: 'el fuego', trap: 'una trampa' };
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

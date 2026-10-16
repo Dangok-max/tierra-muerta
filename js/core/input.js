@@ -26,6 +26,9 @@
   };
 
   // Disposición en px CSS. Se recalcula al cambiar tamaño.
+  // Derecha (pulgar derecho): empujar al borde, USAR arriba del joystick, recargar hacia dentro.
+  // Arriba a la derecha: pausa, linterna y el panel del arma (tocarlo cambia de arma).
+  // Abajo al centro: 3 accesos rápidos + MOCHILA (entre los dos joysticks, sin tapar el juego).
   Input.layoutButtons = function (w, h) {
     this.w = w; this.h = h;
     const s = this.s = U.clamp(Math.min(h * 0.135, w * 0.07), 38, 72);
@@ -33,17 +36,28 @@
     this.aimStick.R = s * 1.15;
     this.aimHome = { x: w - s * 2.1, y: h - s * 2.0 };
     this.moveHome = { x: s * 2.1, y: h - s * 2.0 };
+    const cx = w / 2, qy = h - s * 0.7;
     this.buttons = [
-      { id: 'shove',  x: w - s * 0.85, y: h - s * 3.75, r: s * 0.62, label: 'EMPUJAR' },
-      { id: 'reload', x: w - s * 2.35, y: h - s * 4.05, r: s * 0.52, label: 'RECARGAR' },
-      { id: 'light',  x: w - s * 3.75, y: h - s * 3.55, r: s * 0.46, label: 'LINTERNA' },
+      { id: 'shove',  x: w - s * 0.85, y: h - s * 3.75, r: s * 0.62, label: 'EMPUJAR', touchOnly: true },
+      { id: 'use',    x: w - s * 2.35, y: h - s * 4.05, r: s * 0.6,  label: 'USAR', touchOnly: true },
+      { id: 'reload', x: w - s * 3.8,  y: h - s * 3.5,  r: s * 0.48, label: 'RECARGAR', touchOnly: true },
+      { id: 'light',  x: w - s * 1.8,  y: s * 0.7,      r: s * 0.42, label: 'LINTERNA', touchOnly: true },
       { id: 'pause',  x: w - s * 0.7,  y: s * 0.7,      r: s * 0.42, label: '' },
+      { id: 'q1',     x: cx - s * 1.7,  y: qy, r: s * 0.44, slot: 0 },
+      { id: 'q2',     x: cx - s * 0.58, y: qy, r: s * 0.44, slot: 1 },
+      { id: 'q3',     x: cx + s * 0.54, y: qy, r: s * 0.44, slot: 2 },
+      { id: 'bag',    x: cx + s * 1.75, y: qy, r: s * 0.5, label: 'MOCHILA' },
+      { id: 'swap',   rect: true, x: w - s * 3.7, y: s * 1.3, w: s * 3.45, h: s * 1.05 },
     ];
   };
 
-  function buttonAt(x, y) {
+  function buttonAt(x, y, mouse) {
     for (const b of Input.buttons) {
-      if (b.hidden) continue;
+      if (b.hidden || (mouse && b.touchOnly)) continue;
+      if (b.rect) {
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b;
+        continue;
+      }
       const rr = b.r * 1.25; // área táctil un poco mayor que el dibujo
       if (U.dist2(x, y, b.x, b.y) <= rr * rr) return b;
     }
@@ -93,7 +107,10 @@
         if (Input.moveStick.id === null) {
           const st = Input.moveStick;
           st.id = t.identifier; st.active = true;
-          st.bx = p.x; st.by = p.y; st.kx = p.x; st.ky = p.y;
+          // cerca del borde la base se mete un poco hacia dentro (el resto lo resuelve el umbral de borde)
+          const m = st.R * 0.42;
+          st.bx = Math.max(p.x, m); st.by = U.clamp(p.y, m, Input.h - m);
+          st.kx = p.x; st.ky = p.y;
         }
       } else if (Input.aimStick.id === null) {
         const st = Input.aimStick;
@@ -122,14 +139,15 @@
   }
 
   const KEYMAP = {
-    KeyR: 'reload', Space: 'shove', KeyE: 'shove', KeyF: 'light', Escape: 'pause', KeyP: 'pause',
+    KeyR: 'reload', Space: 'shove', KeyE: 'use', KeyF: 'light', Escape: 'pause', KeyP: 'pause',
+    KeyI: 'bag', Tab: 'bag', KeyQ: 'swap', Digit1: 'q1', Digit2: 'q2', Digit3: 'q3',
   };
 
   function onKeyDown(e) {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     Input.keys[e.code] = true;
     if (Input.enabled && KEYMAP[e.code] && !e.repeat) { Input.pressed[KEYMAP[e.code]] = true; }
-    if (e.code === 'Space') e.preventDefault();
+    if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
   }
   function onKeyUp(e) { Input.keys[e.code] = false; }
 
@@ -144,14 +162,23 @@
     if (TM.Audio && TM.Audio.init) TM.Audio.init();
     if (!Input.enabled) return;
     const p = pos(e);
-    const b = buttonAt(p.x, p.y);
-    if (b && b.id === 'pause') { Input.pressed.pause = true; return; }
+    const b = buttonAt(p.x, p.y, true);
+    if (b && e.button === 0) { Input.pressed[b.id] = true; return; }
     if (e.button === 0) Input.mouseDown = true;
     if (e.button === 2) Input.pressed.shove = true;
     Input.mx = p.x; Input.my = p.y;
     Input.lastMouseMove = performance.now();
   }
   function onMouseUp(e) { if (e.button === 0) Input.mouseDown = false; }
+  let wheelT = 0;
+  function onWheel(e) {
+    e.preventDefault();
+    if (!Input.enabled || Input.usingTouch) return;
+    const now = performance.now();
+    if (now - wheelT < 160) return;
+    wheelT = now;
+    Input.pressed.swap = true;
+  }
 
   Input.init = function (canvas) {
     this.canvas = canvas;
@@ -162,6 +189,7 @@
     canvas.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -202,9 +230,29 @@
   Input.update = function () {
     // Movimiento
     let mx = 0, my = 0, mmag = 0, sprint = false;
+    const now = performance.now();
+    const dtu = Math.min(0.05, Math.max(0, (now - (this._lastUpd || now)) / 1000));
+    this._lastUpd = now;
     if (this.moveStick.active) {
       const st = this.moveStick;
-      sprint = Math.hypot(st.kx - st.bx, st.ky - st.by) > st.R * SPRINT_RATIO;
+      // dedo apoyado contra el borde empujando hacia fuera: la base se desliza hacia dentro hasta
+      // dejar sitio para el anillo de correr (antes podía quedar fuera de la pantalla)
+      const E = 12, slide = 220 * dtu, lim = st.R * (SPRINT_RATIO + 0.06);
+      const d0 = Math.hypot(st.kx - st.bx, st.ky - st.by) || 1;
+      const ux0 = (st.kx - st.bx) / d0, uy0 = (st.ky - st.by) / d0;
+      if (d0 > st.R * 0.3) {
+        if (st.kx < E && ux0 < -0.6) st.bx = Math.min(st.bx + slide, st.kx + lim);
+        if (st.ky > this.h - E && uy0 > 0.6) st.by = Math.max(st.by - slide, st.ky - lim);
+        if (st.ky < E && uy0 < -0.6) st.by = Math.min(st.by + slide, st.ky + lim);
+      }
+      const d = Math.hypot(st.kx - st.bx, st.ky - st.by);
+      sprint = d > st.R * SPRINT_RATIO;
+      // dedo pegado al borde de la pantalla empujando hacia él: no cabe el anillo de correr, así que basta
+      // con llevar el joystick al tope (con histéresis para que no parpadee)
+      if (!sprint && d > st.R * (this.move.sprint ? 0.75 : 0.88)) {
+        const E = 12, ux = (st.kx - st.bx) / d, uy = (st.ky - st.by) / d;
+        if ((st.kx < E && ux < -0.5) || (st.ky > this.h - E && uy > 0.5) || (st.ky < E && uy < -0.5)) sprint = true;
+      }
       const v = stickVec(st);
       // zona muerta pequeña y curva de respuesta suave
       const m = v.mag < 0.12 ? 0 : (v.mag - 0.12) / 0.88;

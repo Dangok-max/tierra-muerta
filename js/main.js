@@ -123,6 +123,18 @@
       if (d.weather) Object.assign(this.weather, d.weather);
       this.combat.deserialize(d.combat);
       if (d.director && this.director.deserialize) this.director.deserialize(d.director);
+      // Fase 2: estado del mundo, inventario y necesidades (las partidas v1 no los tienen)
+      if (d.world && this.world.deserialize) this.world.deserialize(d.world);
+      if (d.inventory && p.inventory && p.inventory.deserialize) p.inventory.deserialize(d.inventory);
+      if (d.needs) {
+        if (Number.isFinite(d.needs.hunger)) p.hunger = U.clamp(d.needs.hunger, 0, 100);
+        if (Number.isFinite(d.needs.thirst)) p.thirst = U.clamp(d.needs.thirst, 0, 100);
+      }
+      // el mapa puede haber cambiado entre versiones: no aparecer dentro de una pared
+      if (this.world.findFree && !this.world.isFree(p.x, p.y, p.r + 1)) {
+        const f = this.world.findFree(p.x, p.y, p.r + 1, 600);
+        p.x = f.x; p.y = f.y;
+      }
       this.updateClock();
       this.camera.snap(p);
       this.state = 'play';
@@ -133,13 +145,16 @@
     serialize() {
       const p = this.player;
       return {
-        game: 'tierra-muerta', v: 1, savedAt: Date.now(),
+        game: 'tierra-muerta', v: 2, savedAt: Date.now(),
         seed: this.seed, time: this.time, day: this.day, kills: this.totalKills(),
         player: { name: p.name, x: p.x, y: p.y, hp: p.hp, stamina: p.stamina, maxDist: p.maxDist, flashlightOn: p.flashlightOn },
         stats: this.stats,
         weather: { rain: this.weather.rain, fog: this.weather.fog, targetRain: this.weather.targetRain, targetFog: this.weather.targetFog, next: this.weather.next },
         combat: this.combat.serialize(),
         director: this.director.serialize ? this.director.serialize() : null,
+        world: this.world.serialize ? this.world.serialize() : null,
+        inventory: p.inventory && p.inventory.serialize ? p.inventory.serialize() : null,
+        needs: { hunger: p.hunger, thirst: p.thirst },
       };
     }
 
@@ -202,7 +217,8 @@
       if (this.director && this.director.onKill) this.director.onKill(z, kind);
     }
 
-    onPlayerDeath() {
+    onPlayerDeath(kind) {
+      this.deathCause = kind || 'zombie';
       this.notify('Has caído…', '#c03020');
       TM.Save.clear();
       const rec = TM.Save.updateRecords({
@@ -332,6 +348,7 @@
           night: this.darkness, rain: this.weather.rain,
           danger: U.clamp(this.world.dangerAt(p.x, p.y), 0, 1), combat: U.clamp(near / 6, 0, 1),
           health: p.hp / p.maxHp,
+          indoor: this.world.buildingAt && this.world.buildingAt(p.x, p.y) ? 1 : 0,
         });
       }
 
