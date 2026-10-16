@@ -1273,9 +1273,15 @@
   };
   // Marca de puerta exterior sobre el techo (para verla desde fuera)
   D.doorMark = function (ctx, d) {
-    const col = d.broken ? '#141210' : d.open ? '#1a1816' : (DOORC[d.mat] || DOORC.wood);
+    // abierta o rota = hueco claro en el muro (se ve que se puede pasar); cerrada = color del material
+    const col = d.broken ? '#5e5040' : d.open ? '#6a5c48' : (DOORC[d.mat] || DOORC.wood);
     ctx.fillStyle = col;
     ctx.fillRect(d.x - 1, d.y - 1, d.w + 2, d.h + 2);
+    if (d.broken) {
+      ctx.fillStyle = '#3a2c1e';
+      if (d.horiz) { ctx.fillRect(d.x + 2, d.y, 6, d.h); ctx.fillRect(d.x + d.w - 7, d.y, 5, d.h); }
+      else { ctx.fillRect(d.x, d.y + 2, d.w, 6); ctx.fillRect(d.x, d.y + d.h - 7, d.w, 5); }
+    }
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     if (d.horiz) ctx.fillRect(d.x - 3, d.y - 1, 3, d.h + 2), ctx.fillRect(d.x + d.w, d.y - 1, 3, d.h + 2);
     else ctx.fillRect(d.x - 1, d.y - 3, d.w + 2, 3), ctx.fillRect(d.x - 1, d.y + d.h, d.w + 2, 3);

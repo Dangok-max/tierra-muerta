@@ -101,9 +101,10 @@
       // línea libre hasta casi el objeto (el mueble que lo contiene no cuenta)
       const d = U.dist(p.x, p.y, x, y);
       const sh = short || 20; // lo que mide el mueble/auto desde su centro hasta el borde
-      if (d < sh + 2 || typeof W.lineOfSight !== 'function') return true;
+      if (d < sh + 2 || typeof W.raycast !== 'function') return true;
       const k = (d - sh) / d;
-      if (W.lineOfSight(p.x, p.y, p.x + (x - p.x) * k, p.y + (y - p.y) * k)) return true;
+      // raycast sólido: también frena en puertas de cristal cerradas (que no tapan la vista)
+      if (W.raycast(p.x, p.y, p.x + (x - p.x) * k, p.y + (y - p.y) * k) >= 1) return true;
       // solo cuentan paredes, ventanas y puertas; los muebles bajos (una cama) no impiden alcanzar la mesita
       const o = W.lastRayObstacle;
       return !!o && o.kind !== 'wall' && o.kind !== 'window' && o.kind !== 'door';
