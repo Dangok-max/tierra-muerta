@@ -1,6 +1,18 @@
 // Iluminación: capa de oscuridad a baja resolución con luces recortadas, niebla y lluvia.
 (function () {
   const U = TM.U;
+  // Cuánto tapa la luz un obstáculo: 1 = sombra completa, 0.4 = sombra tenue, 0 = deja pasar.
+  // Sólidos y opacos (muros, puertas, autos, contenedores, rocas, troncos, muebles altos, ventanas tapiadas) = 1;
+  // vallas de alambre/madera = tenue; ventanas, cristal, rejas, muebles bajos, agua y barrancos = nada.
+  const SOLID_KINDS = { car: 1, container: 1, truck: 1, bus: 1, dumpster: 1 };
+  function lightBlock(o) {
+    if (o.over) return 0;
+    if (o.blocksSight) return 1;
+    if (SOLID_KINDS[o.kind]) return 1;
+    if (o.kind === 'window') return o.boarded ? 1 : 0;
+    if (o.kind === 'fence') return 0.4;
+    return 0;
+  }
 
   function radialSprite(size, stops) {
     const c = U.makeCanvas(size, size), g = c.getContext('2d');
@@ -175,7 +187,7 @@
         let n = 0;
         for (let i = 0; i < obs.length; i++) {
           const o = obs[i];
-          if (!o.blocksSight) continue;
+          if (!lightBlock(o)) continue;
           let keep = false;
           if (o.shape === 'rect') {
             const qx = U.clamp(lx, o.x, o.x + o.w), qy = U.clamp(ly, o.y, o.y + o.h);
@@ -211,8 +223,11 @@
         else { pc.moveTo(bx, by); pc.lineTo(ax, ay); pc.lineTo(fax, fay); pc.lineTo(fbx, fby); }
         pc.closePath();
       };
+      const drawSet = (soft) => {
+      pc.beginPath();
       for (const o of obs) {
-        if (!o.blocksSight) continue;
+        const lb = lightBlock(o);
+        if (!lb || (lb < 1) !== soft) continue;
         if (o.shape === 'rect') {
           const x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
           // solo los bordes que dan a la luz bastan para la silueta
@@ -220,7 +235,7 @@
           if (ly > y1) quad(x1, y1, x0, y1);
           if (lx < x0) quad(x0, y1, x0, y0);
           if (lx > x1) quad(x1, y0, x1, y1);
-          pc.rect(x0, y0, o.w, o.h);
+          if (!SOLID_KINDS[o.kind] && o.kind !== 'fence') pc.rect(x0, y0, o.w, o.h); // el auto se ilumina por encima
         } else {
           // círculo: segmento entre las dos tangentes
           const dx = o.cx - lx, dy = o.cy - ly, d = Math.hypot(dx, dy);
@@ -228,11 +243,13 @@
           const back = Math.atan2(-dy, -dx), h = Math.acos(o.r / d);
           quad(o.cx + Math.cos(back - h) * o.r, o.cy + Math.sin(back - h) * o.r,
                o.cx + Math.cos(back + h) * o.r, o.cy + Math.sin(back + h) * o.r);
-          pc.moveTo(o.cx + o.r, o.cy);
-          pc.arc(o.cx, o.cy, o.r, 0, Math.PI * 2);
+          if (!SOLID_KINDS[o.kind]) { pc.moveTo(o.cx + o.r, o.cy); pc.arc(o.cx, o.cy, o.r, 0, Math.PI * 2); }
         }
       }
       pc.fill();
+      };
+      drawSet(false);
+      pc.globalAlpha = 0.4; drawSet(true); pc.globalAlpha = 1;
       pc.globalCompositeOperation = 'source-over';
     }
 
