@@ -125,6 +125,7 @@
       }
       const d = t.obj;
       if (d.broken) return { text: 'PUERTA ROTA', color: '#a09080', dim: true };
+      if (!d.open && (d.locked || d.barricade)) return { text: 'ATRANCADA (rómpela a golpes)', color: '#d0a080' };
       return { text: d.open ? 'CERRAR PUERTA' : 'ABRIR PUERTA', color: '#e0d6c0' };
     }
 
@@ -147,7 +148,12 @@
         const inside = (e) => Math.abs(e.x - c.x) < hw + e.r && Math.abs(e.y - c.y) < hh + e.r;
         if (inside(p) || g.zombies.some((z) => !z.dead && inside(z))) { g.fx.floatText(c.x, c.y - 16, 'Algo bloquea la puerta', '#d0a080'); return; }
       }
-      call(W, 'setDoor', d.id, open);
+      if (call(W, 'setDoor', d.id, open) === false) {
+        g.fx.floatText(c.x, c.y - 16, 'Atrancada: rómpela con un arma cuerpo a cuerpo', '#d0a080');
+        if (TM.Audio) TM.Audio.play('door_bash', c.x, c.y, { volume: 0.35, pitch: 1.3 });
+        g.emitNoise(c.x, c.y, 120, 'door');
+        return;
+      }
       if (TM.Audio) TM.Audio.play(open ? 'door_open' : 'door_close', c.x, c.y);
       g.emitNoise(c.x, c.y, 180, 'door');
     }

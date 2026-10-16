@@ -361,6 +361,27 @@
         hits++;
       }
       g.fx.swipe(p.x, p.y, s.ang);
+      // sin zombies alcanzados: golpear la puerta cerrada que hay delante (atrancadas incluidas)
+      if (!hits && g.world.doorsNear && g.world.damageDoor) {
+        const fx = p.x + Math.cos(s.ang) * w.range * 0.7, fy = p.y + Math.sin(s.ang) * w.range * 0.7;
+        let door = null;
+        try { door = g.world.doorsNear(fx, fy, w.range * 0.6).find((d) => !d.open && !d.broken); } catch (e) { door = null; }
+        if (door) {
+          const dc = door.cx !== undefined ? { x: door.cx, y: door.cy } : { x: door.x + door.w / 2, y: door.y + door.h / 2 };
+          const broke = g.world.damageDoor(door.id, w.damage * (s.tired ? 0.6 : 1));
+          if (TM.Audio) TM.Audio.play(broke ? 'door_break' : 'door_bash', dc.x, dc.y);
+          g.fx.spark(dc.x, dc.y, -Math.cos(s.ang), -Math.sin(s.ang), broke ? 8 : 3);
+          g.shake(broke ? 4 : 2);
+          g.emitNoise(dc.x, dc.y, broke ? 400 : 250, 'door_bash');
+          if (broke) g.fx.floatText(dc.x, dc.y - 16, 'Puerta rota', '#d0a080');
+          const st = s.stack;
+          if (st && w.durLoss && this.inv.slots.indexOf(st) >= 0) {
+            st.dur = (st.dur === undefined ? 1 : st.dur) - w.durLoss;
+            if (st.dur <= 0) this.breakWeapon(st);
+            this.inv.changed();
+          }
+        }
+      }
       if (hits) {
         if (TM.Audio) TM.Audio.play('melee_hit', p.x, p.y, { pitch: w.damage > 60 ? 0.85 : 1 });
         g.shake(kills ? 4 : 3);
@@ -611,6 +632,7 @@
         f.noiseT -= dt;
         if (f.noiseT <= 0) { f.noiseT = 3; g.emitNoise(f.x, f.y, f.w.noise, 'flare'); }
       }
+      fireLvl = Math.max(fireLvl, g.envFire || 0);
       this.fireLevel = fireLvl;
       if (TM.Audio && TM.Audio.setFire && (fireLvl > 0 || this._fireSent > 0)) { TM.Audio.setFire(fireLvl); this._fireSent = fireLvl; }
     }

@@ -1,6 +1,6 @@
 // Service worker: red primero (siempre la última versión con internet) y caché como respaldo sin conexión.
 // Al instalarse guarda todo el juego, así funciona sin conexión desde la primera visita.
-const CACHE = 'tierra-muerta-v3';
+const CACHE = 'tierra-muerta-v4';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/style.css',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png',

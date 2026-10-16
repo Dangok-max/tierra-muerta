@@ -93,15 +93,22 @@
       }
 
       // --- objetos dinámicos (fuego) ---
+      let envFire = 0;
+      const fpl = game.player;
       for (const ch of vis) {
         for (const d of ch.dyn) {
           if (d.kind === 'fire') {
+            if (fpl) {
+              const fd = Math.hypot(d.x - fpl.x, d.y - fpl.y);
+              envFire = Math.max(envFire, (d.small ? 0.7 : 1) * Math.max(0, Math.min(1, 1 - (fd - 60) / 440)));
+            }
             const f = 0.85 + Math.sin(t * 13 + d.x) * 0.05 + Math.sin(t * 7.3) * 0.06 + Math.random() * 0.05;
             game.frameLights.push({ x: d.x, y: d.y, radius: (d.small ? 200 : 300) * f, intensity: 0.95 });
             this.drawFire(ctx, d.x, d.y, t);
           }
         }
       }
+      game.envFire = envFire;
       // --- puertas, cofres abiertos y objetos del suelo ---
       if (W.drawDynamic) W.drawDynamic(ctx, vis, cam, t);
 
