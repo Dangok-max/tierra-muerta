@@ -368,7 +368,7 @@
         try { door = g.world.doorsNear(fx, fy, w.range * 0.6).find((d) => !d.open && !d.broken); } catch (e) { door = null; }
         if (door) {
           const dc = door.cx !== undefined ? { x: door.cx, y: door.cy } : { x: door.x + door.w / 2, y: door.y + door.h / 2 };
-          const broke = g.world.damageDoor(door.id, w.damage * (s.tired ? 0.6 : 1));
+          const broke = g.world.damageDoor(door.id, w.damage * (s.tired ? 0.6 : 1) * (w.look === 'fists' ? 0.35 : 1));
           if (TM.Audio) TM.Audio.play(broke ? 'door_break' : 'door_bash', dc.x, dc.y);
           g.fx.spark(dc.x, dc.y, -Math.cos(s.ang), -Math.sin(s.ang), broke ? 8 : 3);
           g.shake(broke ? 4 : 2);

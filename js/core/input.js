@@ -36,7 +36,7 @@
     this.aimStick.R = s * 1.15;
     this.aimHome = { x: w - s * 2.1, y: h - s * 2.0 };
     this.moveHome = { x: s * 2.1, y: h - s * 2.0 };
-    const cx = w / 2, qy = h - s * 0.7;
+    const cx = w / 2 + s * 0.6, qy = h - s * 0.7;
     this.buttons = [
       { id: 'shove',  x: w - s * 0.85, y: h - s * 3.75, r: s * 0.62, label: 'EMPUJAR', touchOnly: true },
       { id: 'use',    x: w - s * 2.35, y: h - s * 4.05, r: s * 0.6,  label: 'USAR', touchOnly: true },
@@ -49,6 +49,9 @@
       { id: 'bag',    x: cx + s * 1.75, y: qy, r: s * 0.5, label: 'MOCHILA' },
       { id: 'swap',   rect: true, x: w - s * 3.7, y: s * 1.3, w: s * 3.45, h: s * 1.05 },
     ];
+    // la zona del joystick de mover termina antes del primer acceso rápido (no gastar vendas sin querer)
+    const q1 = this.buttons.find((b) => b.id === 'q1');
+    this.moveZoneX = Math.min(w * 0.42, q1.x - q1.r - 6);
   };
 
   function buttonAt(x, y, mouse) {
@@ -103,7 +106,7 @@
         Input.vibrate(8);
         continue;
       }
-      if (p.x < Input.w * 0.42) {
+      if (p.x < (Input.moveZoneX || Input.w * 0.42)) {
         if (Input.moveStick.id === null) {
           const st = Input.moveStick;
           st.id = t.identifier; st.active = true;

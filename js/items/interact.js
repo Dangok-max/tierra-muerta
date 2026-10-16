@@ -71,7 +71,7 @@
       // registro de cofre
       if (this.search) {
         const s = this.search;
-        if (U.dist(p.x, p.y, s.chest.x, s.chest.y) > R_CHEST + 22) this.cancelSearch('Registro interrumpido');
+        if (U.dist(p.x, p.y, s.chest.x, s.chest.y) > R_CHEST + 22 || !this.reachable(s.chest.x, s.chest.y, s.chest.loose ? null : s.chest.buildingId, s.chest.container === 'maletero' ? 34 : 20)) this.cancelSearch('Registro interrumpido');
         else {
           s.t += dt;
           if (Math.random() < dt * 4) g.fx.dust(s.chest.x + U.randRange(-8, 8), s.chest.y + U.randRange(-8, 8), 1);
@@ -84,6 +84,29 @@
       // munición del suelo: se recoge sola al pasar por encima
       this.autoT -= dt;
       if (this.autoT <= 0) { this.autoT = 0.2; this.autoPickup(); }
+    }
+
+    // ---------- alcance real (sin atravesar paredes) ----------
+    reachable(x, y, buildingId, short) {
+      const p = this.game.player, W = this.world;
+      // si el objeto está dentro de un edificio, hay que estar dentro de ese edificio
+      // (el maletero de un auto aparcado fuera tiene buildingId pero se registra desde la calle)
+      if (buildingId) {
+        const ob = call(W, 'buildingAt', x, y);
+        if (ob && ob.id === buildingId) {
+          const pb = call(W, 'buildingAt', p.x, p.y);
+          if (!pb || pb.id !== buildingId) return false;
+        }
+      }
+      // línea libre hasta casi el objeto (el mueble que lo contiene no cuenta)
+      const d = U.dist(p.x, p.y, x, y);
+      const sh = short || 20; // lo que mide el mueble/auto desde su centro hasta el borde
+      if (d < sh + 2 || typeof W.lineOfSight !== 'function') return true;
+      const k = (d - sh) / d;
+      if (W.lineOfSight(p.x, p.y, p.x + (x - p.x) * k, p.y + (y - p.y) * k)) return true;
+      // solo cuentan paredes, ventanas y puertas; los muebles bajos (una cama) no impiden alcanzar la mesita
+      const o = W.lastRayObstacle;
+      return !!o && o.kind !== 'wall' && o.kind !== 'window' && o.kind !== 'door';
     }
 
     // ---------- objetivos cercanos ----------
@@ -100,13 +123,13 @@
       for (const c of chests) {
         if (!c || c.opened) continue;
         const d = U.dist(p.x, p.y, c.x, c.y);
-        if (d < R_CHEST && d < bestD) { bestD = d; best = { type: 'chest', obj: c, x: c.x, y: c.y }; }
+        if (d < R_CHEST && d < bestD && this.reachable(c.x, c.y, c.loose ? null : c.buildingId, c.container === 'maletero' ? 34 : 20)) { bestD = d; best = { type: 'chest', obj: c, x: c.x, y: c.y }; }
       }
       const doors = call(W, 'doorsNear', p.x, p.y, R_DOOR + 30) || [];
       for (const dr of doors) {
         if (!dr) continue;
         const d = doorDist(p.x, p.y, dr) + 4;
-        if (d < R_DOOR && d < bestD) { const c = doorCenter(dr); bestD = d; best = { type: 'door', obj: dr, x: c.x, y: c.y }; }
+        if (d < R_DOOR && d < bestD && (dr.ext || this.reachable(doorCenter(dr).x, doorCenter(dr).y, dr.buildingId))) { const c = doorCenter(dr); bestD = d; best = { type: 'door', obj: dr, x: c.x, y: c.y }; }
       }
       if (best) best.label = this.labelFor(best);
       return best;

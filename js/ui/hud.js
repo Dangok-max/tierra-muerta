@@ -320,7 +320,9 @@
       const R = Math.min(W, H) * 0.42;
       const x = cx + Math.cos(a) * R;
       // no tapar el reloj ni los avisos de arriba
-      const y = Math.max(H * 0.36, cy + Math.sin(a) * R);
+      // ni los accesos rápidos de abajo (la etiqueta va 18 px por debajo de la flecha)
+      const s = (TM.Input && TM.Input.s) || 48;
+      const y = Math.min(H - s * 1.35 - 24, Math.max(H * 0.36, cy + Math.sin(a) * R));
       ctx.save(); ctx.translate(x, y); ctx.rotate(a);
       ctx.fillStyle = 'rgba(230,170,80,0.7)';
       ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-6, -7); ctx.lineTo(-3, 0); ctx.lineTo(-6, 7); ctx.closePath(); ctx.fill();

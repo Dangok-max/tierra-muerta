@@ -769,10 +769,11 @@
   }
 
   // Intenta poner un lote del tipo kind a lo largo de una carretera
-  function tryLotAt(P, s, road, sAl, side, kind, filter) {
+  function tryLotAt(P, s, road, sAl, side, kind, filter, scale) {
     const rng = P.rng;
     const L = LOT[kind === 'house_s' || kind === 'house_m' || kind === 'house_v' ? kind : kind] || LOT.house_s;
-    const fw = R_(rng, L[0], L[1]), dp = R_(rng, L[2], L[3]);
+    const sc = scale || 1;
+    const fw = R_(rng, L[0], L[1]) * sc, dp = R_(rng, L[2], L[3]) * sc;
     const p = G.roadAt(road, sAl);
     const nx = -p.dy * side, ny = p.dx * side;
     for (let k = 0; k < 3; k++) {
@@ -824,7 +825,10 @@
     let k = 0;
     for (const kind of pois) {
       let placed = false;
-      for (let t = 0; t < 40 && !placed; t++) {
+      // los recintos enormes (hospital, fábrica) casi nunca caben enteros: más intentos y, si no, un solar algo menor
+      const big = kind === 'hospital' || kind === 'factory' || kind === 'school';
+      const tries = big ? 70 : 40;
+      for (let t = 0; t < tries && !placed; t++) {
         if (WG.over()) yield;
         const road = roads[Math.floor(rng.next() * roads.length)];
         if (!road || road.len < 20 * M) continue;
@@ -835,7 +839,7 @@
           if (want && t < 25 && district(P, s, x, y) !== want && !(want === 'residential' && district(P, s, x, y) === 'periphery')) return false;
           if (kind === 'gas' && road.kind !== 'highway' && road.kind !== 'road' && road.kind !== 'avenue' && t < 30) return false;
           return true;
-        });
+        }, big ? (t < 25 ? 1 : t < 45 ? 0.85 : 0.72) : 1);
         if (lot) { build(P, kind, lot); placed = true; }
       }
       yield; k++;
