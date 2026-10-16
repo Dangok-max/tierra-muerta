@@ -20,7 +20,117 @@
     if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
   }
 
-  const D = { blob };
+  // Sol: las sombras caen hacia abajo-derecha (luz desde arriba-izquierda) en todo el mundo.
+  const SUN = { x: 0.6, y: 0.8 };
+  const SPM = 5;   // unidades de sombra por metro de altura
+  const LOWQ = () => TM.Config.quality === 'low';
+  // color hex -> rgb() escalado (acepta también 'rgb(...)' devolviéndolo tal cual)
+  function sh(hex, f) { return hex && hex[0] === '#' ? U.shade(hex, f) : hex; }
+  function mix(hexA, hexB, t) {
+    const a = U.hexToRgb(hexA), b = U.hexToRgb(hexB);
+    return U.rgb(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
+  }
+  // Silueta "de hojas": contorno festoneado
+  function leafy(ctx, x, y, r, rng, n) {
+    ctx.beginPath();
+    n = n || 14;
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * TAU;
+      const rr = r * (0.86 + rng.next() * 0.2);
+      const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(px, py);
+      else {
+        const am = ((i - 0.5) / n) * TAU, rm = r * (1.02 + rng.next() * 0.12);
+        ctx.quadraticCurveTo(x + Math.cos(am) * rm, y + Math.sin(am) * rm, px, py);
+      }
+    }
+    ctx.closePath();
+  }
+  // Sombra proyectada de un rectángulo alineado (barrido en la dirección del sol), con penumbra por capas
+  function castRect(ctx, x, y, w, h, len, a) {
+    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
+    for (const [k, f] of layers) {
+      const dx = SUN.x * len * k, dy = SUN.y * len * k;
+      ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w + dx, y + dy);
+      ctx.lineTo(x + w + dx, y + h + dy); ctx.lineTo(x + dx, y + h + dy); ctx.lineTo(x, y + h);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+  function castCircle(ctx, cx, cy, r, len, a) {
+    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
+    ctx.lineCap = 'round';
+    for (const [k, f] of layers) {
+      ctx.strokeStyle = ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
+      ctx.lineWidth = r * 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + SUN.x * len * k + 0.01, cy + SUN.y * len * k); ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+  }
+  // Sombra de un rectángulo girado (centro, ángulo, largo L, ancho W)
+  function castRot(ctx, x, y, ang, L, W, len, a) {
+    const c = Math.cos(ang), s = Math.sin(ang);
+    const cs = [[-L / 2, -W / 2], [L / 2, -W / 2], [L / 2, W / 2], [-L / 2, W / 2]].map(([u, v]) => [x + u * c - v * s, y + u * s + v * c]);
+    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
+    for (const [k, f] of layers) {
+      const dx = SUN.x * len * k, dy = SUN.y * len * k;
+      const pts = cs.concat(cs.map((p) => [p[0] + dx, p[1] + dy]));
+      ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
+      hullPath(ctx, pts); ctx.fill();
+    }
+  }
+  // Envolvente convexa (puntos pocos) como trazado
+  function hullPath(ctx, pts) {
+    pts = pts.slice().sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+    const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = [];
+    for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+    for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+    const h = lo.slice(0, -1).concat(up.slice(0, -1));
+    ctx.beginPath(); ctx.moveTo(h[0][0], h[0][1]);
+    for (let i = 1; i < h.length; i++) ctx.lineTo(h[i][0], h[i][1]);
+    ctx.closePath();
+  }
+  // Oclusión ambiental en el borde interior de un rectángulo
+  function aoInside(ctx, x, y, w, h, s, a) {
+    const side = (x0, y0, x1, y1, rx, ry, rw, rh) => {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(rx, ry, rw, rh);
+    };
+    s = Math.min(s, w / 2, h / 2);
+    side(x, y, x, y + s, x, y, w, s);
+    side(x, y + h, x, y + h - s, x, y + h - s, w, s);
+    side(x, y, x + s, y, x, y, s, h);
+    side(x + w, y, x + w - s, y, x + w - s, y, s, h);
+  }
+  // Oclusión de contacto alrededor de una huella (fuera)
+  function aoOutside(ctx, x, y, w, h, s, a) {
+    ctx.strokeStyle = `rgba(0,0,0,${a})`;
+    for (let k = 1; k <= 3; k++) { ctx.lineWidth = s * k * 0.66; ctx.strokeRect(x, y, w, h); }
+  }
+  // Caja con bisel: cara superior con borde iluminado (arriba-izq.) y borde en sombra (abajo-der.)
+  function box(ctx, x, y, w, h, col, hgt) {
+    if (hgt) castRect(ctx, x, y, w, h, hgt, 0.32);
+    ctx.fillStyle = sh(col, 0.62); ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, w - 2.5, h - 2.5);
+    ctx.fillStyle = 'rgba(255,245,225,0.13)'; ctx.fillRect(x + 1, y + 1, w - 2.5, 1.2); ctx.fillRect(x + 1, y + 1, 1.2, h - 2.5);
+  }
+  // Polilínea desplazada lateralmente d (normales por vértice)
+  function offsetPts(p, d) {
+    const out = [];
+    const n = p.length / 2;
+    for (let i = 0; i < n; i++) {
+      const ax = p[Math.max(0, i - 1) * 2], ay = p[Math.max(0, i - 1) * 2 + 1];
+      const bx = p[Math.min(n - 1, i + 1) * 2], by = p[Math.min(n - 1, i + 1) * 2 + 1];
+      let dx = bx - ax, dy = by - ay; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+      out.push(p[i * 2] - dy * d, p[i * 2 + 1] + dx * d);
+    }
+    return out;
+  }
+
+  const D = { blob, leafy, castRect, castCircle, castRot, aoInside, aoOutside, box, SUN, SPM };
   let pats = null;
   D.pattern = function (ctx, name) {
     // los patrones se crean por contexto (cada chunk tiene el suyo): caché por contexto
@@ -38,8 +148,8 @@
 
   // ---------- carreteras ----------
   // Añade al trazado los tramos de la carretera que tocan el rectángulo
-  function roadPath(ctx, r, x0, y0, x1, y1) {
-    const p = r.pts, pad = r.w / 2 + (r.side || 0) + 8;
+  function roadPath(ctx, r, x0, y0, x1, y1, pts) {
+    const p = pts || r.pts, pad = r.w / 2 + (r.side || 0) + 8;
     let open = false, any = false;
     for (let i = 0; i < p.length - 2; i += 2) {
       const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
@@ -55,38 +165,144 @@
   D.roads = function (ctx, roads, x0, y0, x1, y1, rng) {
     if (!roads.length) return;
     ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    const stroke = (r, w, style, dash) => {
+    const stroke = (r, w, style, dash, pts) => {
       ctx.beginPath();
-      if (!roadPath(ctx, r, x0, y0, x1, y1)) return;
+      if (!roadPath(ctx, r, x0, y0, x1, y1, pts)) return;
       ctx.lineWidth = w; ctx.strokeStyle = style;
       if (dash) ctx.setLineDash(dash);
       ctx.stroke();
       if (dash) ctx.setLineDash([]);
     };
-    // aceras y bordillos
-    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2, D.pattern(ctx, 'concrete'));
-    for (const r of roads) if (r.side > 0) stroke(r, r.w + 8, 'rgba(20,20,18,0.55)');
+    const paved = (r) => r.kind !== 'dirt' && r.kind !== 'lane';
+    const lq = LOWQ();
+    // aceras de baldosa con bordillo
+    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2 + 6, 'rgba(0,0,0,0.25)');
+    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2, D.pattern(ctx, 'pavers'));
+    // suciedad pegada a las fachadas (borde exterior de la acera)
+    if (!lq) for (const r of roads) if (r.side > 0) { stroke(r, r.w + r.side * 2, 'rgba(30,26,20,0.16)'); stroke(r, r.w + r.side * 2 - 18, D.pattern(ctx, 'pavers')); }
+    for (const r of roads) if (r.side > 0) stroke(r, r.w + 14, 'rgba(150,146,136,0.9)');   // bordillo (cara superior)
+    for (const r of roads) if (r.side > 0) stroke(r, r.w + 6, 'rgba(24,24,22,0.9)');       // canto en sombra
     // arcén de tierra en carreteras rurales
-    for (const r of roads) if (!r.side && r.kind !== 'dirt' && r.kind !== 'lane') stroke(r, r.w + 26, 'rgba(60,52,40,0.35)');
+    for (const r of roads) if (!r.side && paved(r)) { stroke(r, r.w + 34, 'rgba(58,50,38,0.22)'); stroke(r, r.w + 18, 'rgba(70,62,48,0.4)'); }
+    for (const r of roads) if (!paved(r)) stroke(r, r.w + 14, 'rgba(50,40,28,0.25)');
     // calzada
-    for (const r of roads) stroke(r, r.w, D.pattern(ctx, r.kind === 'dirt' ? 'dirtroad' : 'asphalt'));
+    for (const r of roads) stroke(r, r.w, D.pattern(ctx, paved(r) ? 'asphalt' : 'dirtroad'));
+    // mugre en los bordes de la calzada y desgaste por el centro
+    for (const r of roads) if (paved(r)) {
+      stroke(r, r.w, 'rgba(14,12,10,0.22)');
+      stroke(r, r.w - 16, D.pattern(ctx, 'asphalt'));
+      if (!lq) stroke(r, r.w - 40, 'rgba(120,116,108,0.05)');
+    }
+    // rodadas de neumáticos (bandas oscuras)
+    if (!lq) for (const r of roads) {
+      if (!paved(r)) continue;
+      const lanes = r.w > 200 ? [-0.25, 0.25] : [0];
+      for (const ln of lanes) for (const k of [-1, 1]) {
+        const off = r.w * ln + k * 26;
+        if (Math.abs(off) > r.w / 2 - 14) continue;
+        stroke(r, 12, 'rgba(10,10,12,0.10)', null, offsetPts(r.pts, off));
+      }
+    }
     // marcas viales gastadas
     for (const r of roads) {
       if (r.kind === 'highway') {
-        stroke(r, r.w - 18, 'rgba(200,196,180,0.22)');
-        stroke(r, r.w - 24, D.pattern(ctx, 'asphalt'));
+        stroke(r, 3, 'rgba(205,200,186,0.3)', null, offsetPts(r.pts, r.w / 2 - 14));
+        stroke(r, 3, 'rgba(205,200,186,0.3)', null, offsetPts(r.pts, -r.w / 2 + 14));
         stroke(r, 4, 'rgba(190,160,70,0.45)', [56, 44]);
       } else if (r.kind === 'road' || r.kind === 'avenue') {
-        stroke(r, 4, 'rgba(210,205,190,0.3)', [44, 52]);
-      } else if (r.kind === 'dirt') {
-        // rodadas
-        stroke(r, r.w * 0.55, 'rgba(40,30,20,0.18)');
-        stroke(r, r.w * 0.3, D.pattern(ctx, 'dirtroad'));
+        stroke(r, 4, 'rgba(210,205,190,0.32)', [44, 52]);
+      } else if (r.kind === 'street' && r.w >= 180) {
+        stroke(r, 3, 'rgba(210,205,190,0.18)', [30, 60]);
+      } else if (!paved(r)) {
+        // rodadas y franja central con hierba
+        for (const k of [-1, 1]) stroke(r, r.w * 0.16, 'rgba(36,26,16,0.28)', null, offsetPts(r.pts, k * r.w * 0.22));
+        stroke(r, r.w * 0.12, 'rgba(70,74,44,0.35)');
       }
     }
+    // borrones de pintura (la pintura vieja se cae a trozos)
     ctx.lineCap = 'butt';
-    // grietas y baches
-    void rng;
+    D.roadWear(ctx, roads, x0, y0, x1, y1, rng);
+  };
+
+  // Grietas, baches, parches, manchas de aceite, hojas y hierbas a lo largo de las calles
+  D.roadWear = function (ctx, roads, x0, y0, x1, y1, rng) {
+    if (!rng) return;
+    const lq = LOWQ();
+    for (const r of roads) {
+      const p = r.pts;
+      const paved = r.kind !== 'dirt' && r.kind !== 'lane';
+      for (let i = 0; i < p.length - 2; i += 2) {
+        const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
+        const L = Math.hypot(bx - ax, by - ay);
+        if (L < 1) continue;
+        const pad = r.w / 2 + 20;
+        if (Math.max(ax, bx) < x0 - pad || Math.min(ax, bx) > x1 + pad || Math.max(ay, by) < y0 - pad || Math.min(ay, by) > y1 + pad) continue;
+        const ux = (bx - ax) / L, uy = (by - ay) / L, nx = -uy, ny = ux;
+        // número de detalles proporcional al tramo que cae en el chunk
+        const n = Math.round(L / (lq ? 260 : 120));
+        for (let k = 0; k < n; k++) {
+          const t = rng.next() * L, side = rng.range(-1, 1);
+          const kind = rng.next();
+          const off = side * (r.w / 2 - 10);
+          const x = ax + ux * t + nx * off, y = ay + uy * t + ny * off;
+          if (x < x0 + 14 || x > x1 - 14 || y < y0 + 14 || y > y1 - 14) continue;
+          if (paved) {
+            if (kind < 0.3) {
+              // grieta longitudinal o en piel de cocodrilo
+              ctx.strokeStyle = 'rgba(8,8,10,0.55)'; ctx.lineWidth = 1.2;
+              ctx.beginPath(); let cx = x, cy = y; ctx.moveTo(cx, cy);
+              let a = Math.atan2(uy, ux) + rng.range(-0.6, 0.6);
+              for (let s = 0; s < 6; s++) { a += rng.range(-0.8, 0.8); cx += Math.cos(a) * rng.range(5, 12); cy += Math.sin(a) * rng.range(5, 12); ctx.lineTo(cx, cy); if (rng.chance(0.3)) { ctx.moveTo(cx, cy); ctx.lineTo(cx + rng.range(-8, 8), cy + rng.range(-8, 8)); ctx.moveTo(cx, cy); } }
+              ctx.stroke();
+            } else if (kind < 0.42) {
+              // bache: hueco oscuro con borde claro y agua al fondo
+              const rr = rng.range(6, 14), r2 = new U.RNG(rng.int(1, 1e9));
+              ctx.fillStyle = 'rgba(120,116,106,0.25)'; blob(ctx, x - 1, y - 1, rr + 2, r2, 9, 0.3); ctx.fill();
+              ctx.fillStyle = '#1a1a1b'; blob(ctx, x, y, rr, r2, 9, 0.3); ctx.fill();
+              ctx.fillStyle = 'rgba(60,70,78,0.45)'; blob(ctx, x + 1, y + 1, rr * 0.55, r2, 7, 0.3); ctx.fill();
+            } else if (kind < 0.55) {
+              // parche de asfalto
+              ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(uy, ux));
+              const w = rng.range(30, 80), h = rng.range(18, 40);
+              ctx.fillStyle = 'rgba(18,18,20,0.4)'; ctx.fillRect(-w / 2, -h / 2, w, h);
+              ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(-w / 2, -h / 2, w, h);
+              ctx.restore();
+            } else if (kind < 0.68) {
+              // mancha de aceite
+              const rr = rng.range(8, 20);
+              const g = ctx.createRadialGradient(x, y, 0, x, y, rr);
+              g.addColorStop(0, 'rgba(8,6,10,0.45)'); g.addColorStop(0.7, 'rgba(8,6,10,0.25)'); g.addColorStop(1, 'rgba(8,6,10,0)');
+              ctx.fillStyle = g; ctx.fillRect(x - rr, y - rr, rr * 2, rr * 2);
+            } else if (kind < 0.8 && !lq) {
+              // hojas y basura arrastradas al bordillo
+              const ex = ax + ux * t + nx * Math.sign(side || 1) * (r.w / 2 - 6), ey = ay + uy * t + ny * Math.sign(side || 1) * (r.w / 2 - 6);
+              for (let q = 0; q < 8; q++) {
+                ctx.fillStyle = rng.pick(['#4a3a24', '#5e4a2c', '#3c2e1e', '#6a5a3a', '#55504a']);
+                ctx.save(); ctx.translate(ex + ux * rng.range(-20, 20) + nx * rng.range(-5, 5), ey + uy * rng.range(-20, 20) + ny * rng.range(-5, 5)); ctx.rotate(rng.range(0, 6.28));
+                ctx.fillRect(-2, -1.2, 4, 2.4); ctx.restore();
+              }
+            } else if (kind < 0.92) {
+              // hierbas en las juntas del bordillo / grietas
+              const ex = ax + ux * t + nx * Math.sign(side || 1) * (r.w / 2 - 3), ey = ay + uy * t + ny * Math.sign(side || 1) * (r.w / 2 - 3);
+              ctx.lineWidth = 1;
+              for (let q = 0; q < 6; q++) {
+                ctx.strokeStyle = rng.pick(['rgba(84,92,52,0.9)', 'rgba(104,104,62,0.85)', 'rgba(66,74,42,0.9)']);
+                const bx2 = ex + ux * rng.range(-10, 10), by2 = ey + uy * rng.range(-10, 10);
+                ctx.beginPath();
+                for (let b = 0; b < 4; b++) { const a = rng.range(0, TAU), l = rng.range(3, 8); ctx.moveTo(bx2, by2); ctx.lineTo(bx2 + Math.cos(a) * l, by2 + Math.sin(a) * l); }
+                ctx.stroke();
+              }
+            }
+          } else if (kind < 0.35) {
+            // charco en la rodada
+            const rr = rng.range(8, 18), r2 = new U.RNG(rng.int(1, 1e9));
+            ctx.fillStyle = 'rgba(30,26,20,0.5)'; blob(ctx, x, y, rr + 3, r2, 9, 0.3); ctx.fill();
+            ctx.fillStyle = 'rgba(52,60,64,0.75)'; blob(ctx, x, y, rr, r2, 9, 0.3); ctx.fill();
+            ctx.fillStyle = 'rgba(160,170,175,0.12)'; ctx.beginPath(); ctx.ellipse(x - rr * 0.3, y - rr * 0.3, rr * 0.4, rr * 0.15, -0.5, 0, TAU); ctx.fill();
+          }
+        }
+      }
+    }
   };
 
   // ---------- zonas de suelo ----------
@@ -487,8 +703,39 @@
   };
 
   // ---------- árboles y rocas ----------
+  const TREEPAL = [
+    ['#232a1d', '#364026', '#4f5a38'],   // verde apagado
+    ['#29271b', '#454027', '#625b37'],   // oliva seco
+    ['#2b2318', '#523f25', '#735a33'],   // otoño marchito
+    ['#1f2a22', '#30402f', '#475a42'],   // verde azulado
+  ];
+  function treeKind(o) {
+    if (o.burned) return 'bare';
+    const v = (o.seed >>> 0) % 10;
+    if (v < 6) return 'leafy';
+    if (v === 6) return 'conifer';
+    if (v === 7) return 'stump';
+    return 'bare';
+  }
+  D.treeKind = treeKind;
+  function clumpPath(ctx, list, k, off, rng) {
+    ctx.beginPath();
+    for (const c of list) {
+      const x = c[0] - SUN.x * c[2] * off, y = c[1] - SUN.y * c[2] * off, r = c[2] * k;
+      const n = 11;
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * TAU + c[3];
+        const rr = r * (0.88 + rng.next() * 0.16);
+        const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py);
+        else { const am = a - TAU / n / 2, rm = r * (1.03 + rng.next() * 0.1); ctx.quadraticCurveTo(x + Math.cos(am) * rm, y + Math.sin(am) * rm, px, py); }
+      }
+      ctx.closePath();
+    }
+  }
   D.tree = function (ctx, o, rng) {
     const cx = o.x, cy = o.y, r = o.r, crown = o.crown;
+    const kind = treeKind(o);
     const wood = o.burned ? rng.pick(['#1e1a16', '#24201c']) : rng.pick(['#4a4036', '#52473b', '#443a31', '#5a4e42']);
     ctx.lineCap = 'round';
     ctx.strokeStyle = wood;
@@ -502,83 +749,182 @@
       const n = rng.chance(0.4) ? 3 : 2;
       for (let k = 0; k < n; k++) branch(ex, ey, a + rng.range(-0.75, 0.75), len * rng.range(0.5, 0.72), Math.max(1, w * 0.6), depth - 1);
     };
-    const variant = o.seed % 6;
-    if (variant === 3 && !o.burned) {
-      // conífera muerta
-      for (let layer = 0; layer < 3; layer++) {
-        const R = crown * (0.85 - layer * 0.25), n = 10 + layer * 2;
-        ctx.fillStyle = ['#2b3027', '#363a2e', '#424532'][layer];
+    if (kind === 'leafy') {
+      const pal = o.swamp ? TREEPAL[3] : TREEPAL[(o.seed >>> 3) % 4];
+      const R = crown * 0.8;
+      const list = [[cx, cy, R * 0.62, rng.range(0, TAU)]];
+      const n = LOWQ() ? 4 : 6 + Math.min(5, Math.floor(R / 22));
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * TAU + rng.range(-0.4, 0.4), d = R * rng.range(0.32, 0.55);
+        list.push([cx + Math.cos(a) * d, cy + Math.sin(a) * d, R * rng.range(0.34, 0.5), rng.range(0, TAU)]);
+      }
+      // ramas que asoman por debajo del borde
+      for (let i = 0; i < 3; i++) { const a = rng.range(0, TAU); branch(cx, cy, a, R * rng.range(0.85, 1.02), r * 0.35, 0); }
+      ctx.fillStyle = pal[0]; clumpPath(ctx, list, 1, 0, rng); ctx.fill();
+      ctx.fillStyle = pal[1]; clumpPath(ctx, list, 0.8, 0.14, rng); ctx.fill();
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = pal[2]; clumpPath(ctx, list, 0.45, 0.32, rng); ctx.fill();
+      ctx.globalAlpha = 1;
+      if (!LOWQ()) {
+        // hojas sueltas: puntitos claros y huecos oscuros
+        for (let i = 0; i < 46; i++) {
+          const a = rng.range(0, TAU), d = Math.sqrt(rng.next()) * R * 0.95;
+          const dark = rng.chance(0.55);
+          ctx.fillStyle = dark ? 'rgba(10,12,8,0.32)' : 'rgba(170,170,120,0.16)';
+          ctx.beginPath(); ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(1.5, 3.5), 0, TAU); ctx.fill();
+        }
+      }
+      ctx.lineCap = 'butt';
+      return;
+    }
+    if (kind === 'conifer') {
+      const R = crown * 0.78;
+      const cols = ['#1e251d', '#2b3528', '#3c4734', '#52603f'];
+      for (let layer = 0; layer < 4; layer++) {
+        const RR = R * (1 - layer * 0.22), nn = 9 + layer * 2;
+        const ox = -SUN.x * R * 0.06 * layer, oy = -SUN.y * R * 0.06 * layer;
+        ctx.fillStyle = cols[layer];
         ctx.beginPath();
-        for (let i = 0; i < n * 2; i++) {
-          const a = (i / (n * 2)) * TAU + layer * 0.3;
-          const rr = (i % 2 ? R * 0.55 : R) * rng.range(0.85, 1.1);
-          const px = cx + Math.cos(a) * rr, py = cy + Math.sin(a) * rr;
+        for (let i = 0; i < nn * 2; i++) {
+          const a = (i / (nn * 2)) * TAU + layer * 0.3;
+          const rr = (i % 2 ? RR * 0.6 : RR) * rng.range(0.86, 1.08);
+          const px = cx + ox + Math.cos(a) * rr, py = cy + oy + Math.sin(a) * rr;
           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
         }
         ctx.closePath(); ctx.fill();
       }
+      ctx.fillStyle = 'rgba(120,130,90,0.35)'; ctx.beginPath(); ctx.arc(cx - SUN.x * R * 0.25, cy - SUN.y * R * 0.25, R * 0.1, 0, TAU); ctx.fill();
       ctx.lineCap = 'butt';
       return;
     }
-    if (variant === 4) {
+    if (kind === 'stump') {
       // tocón con el tronco caído
       const fa = rng.range(0, TAU), FL = crown * 1.0;
       ctx.lineWidth = r * 1.1;
+      ctx.strokeStyle = sh(wood, 0.7);
       ctx.beginPath(); ctx.moveTo(cx + Math.cos(fa) * r, cy + Math.sin(fa) * r); ctx.lineTo(cx + Math.cos(fa) * FL, cy + Math.sin(fa) * FL); ctx.stroke();
+      ctx.lineWidth = r * 0.5; ctx.strokeStyle = sh(wood, 1.05);
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(fa) * r - SUN.x * r * 0.25, cy + Math.sin(fa) * r - SUN.y * r * 0.25); ctx.lineTo(cx + Math.cos(fa) * FL - SUN.x * r * 0.25, cy + Math.sin(fa) * FL - SUN.y * r * 0.25); ctx.stroke();
+      ctx.strokeStyle = wood;
       branch(cx + Math.cos(fa) * FL, cy + Math.sin(fa) * FL, fa + 0.4, crown * 0.3, r * 0.4, 1);
-      ctx.fillStyle = U.shade(o.burned ? '#2a2420' : wood, 1.15);
-      ctx.beginPath(); ctx.arc(cx, cy, r * 0.9, 0, TAU); ctx.fill();
+      ctx.fillStyle = sh(o.burned ? '#2a2420' : wood, 0.8);
+      ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#7a6a50'; ctx.beginPath(); ctx.arc(cx, cy, r * 0.75, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(60,44,28,0.6)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, r * 0.5, 0, TAU); ctx.moveTo(cx + r * 0.25, cy); ctx.arc(cx, cy, r * 0.25, 0, TAU); ctx.stroke();
       ctx.lineCap = 'butt';
       return;
     }
-    const limbs = Math.max(4, (o.branches || 6) - (variant === 2 ? 0 : 1));
+    // árbol muerto, sin hojas
+    const limbs = Math.max(4, (o.branches || 6) - 1);
     const base = rng.range(0, TAU);
+    ctx.strokeStyle = sh(wood, 0.75);
     for (let i = 0; i < limbs; i++) {
       const a = base + (i / limbs) * TAU + rng.range(-0.5, 0.5);
-      branch(cx, cy, a, crown * rng.range(0.32, 0.46), r * 0.55, variant === 2 ? 3 : 2);
+      branch(cx, cy, a, crown * rng.range(0.32, 0.46), r * 0.55, 2);
     }
-    if ((variant === 1 || variant === 5) && !o.burned) {
-      for (let i = 0; i < 8; i++) {
-        const a = rng.range(0, TAU), d = rng.range(crown * 0.3, crown * 0.8);
-        ctx.fillStyle = rng.pick(['rgba(58,60,40,0.55)', 'rgba(70,62,40,0.5)', 'rgba(48,50,36,0.6)', 'rgba(64,56,36,0.5)']);
-        blob(ctx, cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(8, 18), rng, 7, 0.35); ctx.fill();
+    if (!o.burned && rng.chance(0.5)) {
+      for (let i = 0; i < 6; i++) {
+        const a = rng.range(0, TAU), d = rng.range(crown * 0.3, crown * 0.7);
+        ctx.fillStyle = rng.pick(['rgba(58,60,40,0.6)', 'rgba(70,62,40,0.55)', 'rgba(48,50,36,0.65)']);
+        blob(ctx, cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(8, 16), rng, 8, 0.35); ctx.fill();
       }
     }
-    ctx.fillStyle = U.shade(o.burned ? '#2a2420' : wood, 0.85);
+    ctx.fillStyle = sh(o.burned ? '#2a2420' : wood, 0.85);
     ctx.beginPath(); ctx.arc(cx, cy, r * 0.85, 0, TAU); ctx.fill();
-    ctx.fillStyle = 'rgba(255,235,200,0.07)';
+    ctx.fillStyle = 'rgba(255,235,200,0.08)';
     ctx.beginPath(); ctx.arc(cx - r * 0.25, cy - r * 0.25, r * 0.4, 0, TAU); ctx.fill();
     ctx.lineCap = 'butt';
   };
   D.rock = function (ctx, o, rng) {
-    const base = o.desert ? rng.pick(['#6e5e48', '#7a6850', '#62564a']) : rng.pick(['#4e4a44', '#57524a', '#45423e', '#5c5448']);
+    const base = o.desert ? rng.pick(['#6e5e48', '#7a6850', '#62564a']) : rng.pick(['#4e4a44', '#57524a', '#4a4743', '#5c5448']);
+    const R = o.r;
+    const r2 = new U.RNG(rng.int(1, 1e9));
+    // piedras sueltas alrededor
+    for (let i = 0; i < 3; i++) {
+      const a = rng.range(0, TAU), d = R * rng.range(1.1, 1.5), rr = rng.range(2, Math.max(3, R * 0.15));
+      ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(o.x + Math.cos(a) * d + 1.5, o.y + Math.sin(a) * d + 2, rr, 0, TAU); ctx.fill();
+      ctx.fillStyle = sh(base, rng.range(0.85, 1.15)); ctx.beginPath(); ctx.arc(o.x + Math.cos(a) * d, o.y + Math.sin(a) * d, rr, 0, TAU); ctx.fill();
+    }
+    // base en sombra, cara iluminada desplazada hacia el sol, facetas
+    ctx.fillStyle = sh(base, 0.62);
+    blob(ctx, o.x, o.y, R, r2, 10, 0.16); ctx.fill();
     ctx.fillStyle = base;
-    blob(ctx, o.x, o.y, o.r, rng, 9, 0.18); ctx.fill();
-    ctx.fillStyle = 'rgba(255,245,225,0.09)';
-    blob(ctx, o.x - o.r * 0.25, o.y - o.r * 0.3, o.r * 0.55, rng, 7, 0.25); ctx.fill();
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    blob(ctx, o.x + o.r * 0.3, o.y + o.r * 0.3, o.r * 0.5, rng, 7, 0.25); ctx.fill();
-    if (o.r > 30) { ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(o.x - o.r * 0.5, o.y); ctx.lineTo(o.x + o.r * 0.2, o.y + o.r * 0.3); ctx.stroke(); }
+    blob(ctx, o.x - SUN.x * R * 0.1, o.y - SUN.y * R * 0.1, R * 0.86, r2, 9, 0.18); ctx.fill();
+    ctx.fillStyle = sh(base, 1.22);
+    ctx.beginPath();
+    const a0 = -2.2 + rng.range(-0.3, 0.3);
+    ctx.moveTo(o.x - SUN.x * R * 0.15, o.y - SUN.y * R * 0.15);
+    for (let i = 0; i <= 3; i++) { const a = a0 + i * 0.5 + rng.range(-0.1, 0.1); ctx.lineTo(o.x + Math.cos(a) * R * rng.range(0.6, 0.8), o.y + Math.sin(a) * R * rng.range(0.6, 0.8)); }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,248,230,0.08)';
+    blob(ctx, o.x - R * 0.3, o.y - R * 0.35, R * 0.35, r2, 7, 0.25); ctx.fill();
+    // grietas
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let i = 0; i < (R > 26 ? 3 : 1); i++) {
+      let x = o.x + rng.range(-R * 0.5, R * 0.5), y = o.y + rng.range(-R * 0.5, R * 0.5);
+      ctx.moveTo(x, y); for (let k = 0; k < 3; k++) { x += rng.range(-R * 0.3, R * 0.3); y += rng.range(-R * 0.3, R * 0.3); ctx.lineTo(x, y); }
+    }
+    ctx.stroke();
+    // musgo / liquen
+    if (!o.desert) {
+      for (let i = 0; i < 4; i++) { ctx.fillStyle = rng.pick(['rgba(70,84,44,0.45)', 'rgba(100,104,70,0.35)', 'rgba(150,150,120,0.18)']); blob(ctx, o.x + rng.range(-R * 0.5, R * 0.4), o.y + rng.range(-R * 0.5, R * 0.4), R * rng.range(0.12, 0.25), r2, 7, 0.4); ctx.fill(); }
+    }
   };
+
+  // Altura aproximada (m) de los accesorios para sombras (proyectadas y de la linterna)
+  const PROP_H = {
+    rock: 0.8, silo: 12, watertower: 10, fueltank: 4, barrel: 1, haybale: 1.4, well: 0.8, container: 2.6, tent: 2,
+    watchtower: 6, bleacher: 2, dumpster: 1.4, kiosk: 3, log: 0.5, crate: 0.8, milcrate: 0.6, sandbag: 0.8, bench: 0.5,
+    grave: 0.9, pump: 1.7, statue: 3, fountain: 0.8, barrier: 1, barricade: 1.2, trough: 0.7, woodpile: 1, firepit: 0.2,
+    fuselage: 4, smallplane: 2, helicopter: 3, wing: 1.5, scarecrow: 1.8, target: 1.5,
+  };
+  D.PROP_H = PROP_H;
+  const VEH = { car: 1.5, police: 1.5, ambulance: 2.6, military: 3, humvee: 1.9, truck: 3.2, bus: 3.2, van: 2.2, pickup: 1.8, tractor: 2.4, boat: 1 };
 
   // Sombra de un accesorio (antes de dibujarlo)
   D.propShadow = function (ctx, p) {
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
     switch (p.kind) {
       case 'tree': {
-        const sx = p.x + 18, sy = p.y + 22, R = p.crown * 1.0;
-        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, R);
-        g.addColorStop(0, 'rgba(0,0,0,0.24)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+        const kind = treeKind(p);
+        const R = p.crown * (kind === 'bare' || kind === 'stump' ? 0.8 : 0.85);
+        if (kind === 'stump') { castCircle(ctx, p.x, p.y, p.r, 4, 0.3); return; }
+        const off = p.crown * 0.55;
+        const sx = p.x + SUN.x * off, sy = p.y + SUN.y * off;
+        const a = kind === 'bare' ? 0.14 : 0.36;
+        const g = ctx.createRadialGradient(sx, sy, R * 0.2, sx, sy, R);
+        g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(0.65, `rgba(0,0,0,${a * 0.7})`); g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = g; ctx.fillRect(sx - R, sy - R, R * 2, R * 2);
+        castCircle(ctx, p.x, p.y, p.r * 0.8, off * 0.9, 0.22);
         return;
       }
-      case 'rock': case 'silo': case 'watertower': case 'fueltank': case 'barrel': case 'haybale': case 'well':
-        ctx.beginPath(); ctx.ellipse(p.x + p.r * 0.25 + 3, p.y + p.r * 0.3 + 4, p.r, p.r * 0.85, 0, 0, TAU); ctx.fill();
+      case 'rock': {
+        const h = p.r > 26 ? 1.3 : 0.6;
+        castCircle(ctx, p.x, p.y, p.r * 0.92, h * SPM * 1.6, 0.4);
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(p.x + 1, p.y + 1.5, p.r * 1.02, 0, TAU); ctx.fill();
         return;
-      case 'container': case 'tent': case 'watchtower': case 'bleacher': case 'dumpster': case 'kiosk':
-        ctx.fillRect(p.x - p.w / 2 + 10, p.y - p.h / 2 + 14, p.w, p.h);
+      }
+      case 'silo': case 'watertower': case 'fueltank': case 'barrel': case 'haybale': case 'well': case 'fountain': case 'statue':
+        castCircle(ctx, p.x, p.y, p.r, Math.min(60, PROP_H[p.kind] * SPM), 0.36);
         return;
+      case 'container': case 'tent': case 'watchtower': case 'bleacher': case 'dumpster': case 'kiosk': case 'log': case 'crate':
+      case 'milcrate': case 'sandbag': case 'bench': case 'grave': case 'pump': case 'barricade': case 'woodpile':
+        castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, Math.min(60, PROP_H[p.kind] * SPM), 0.36);
+        return;
+      case 'barrier':
+        if (p.rotated) castRot(ctx, p.x, p.y, p.ang || 0, p.w, p.h, SPM, 0.34);
+        else castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, SPM, 0.34);
+        return;
+      case 'fence': {
+        const hm = p.style === 'concrete' ? 2.2 : p.style === 'stone' ? 1 : p.style === 'chain' ? 0 : 1.2;
+        if (!hm) return;
+        castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, hm * SPM, p.style === 'concrete' || p.style === 'stone' ? 0.38 : 0.22);
+        return;
+      }
+      case 'fuselage': castRot(ctx, p.x, p.y, p.ang, p.L, p.rad * 2, 20, 0.36); return;
     }
+    if (VEH[p.kind] && p.L) castRot(ctx, p.x, p.y, p.ang, p.L * 0.96, p.W * 0.94, VEH[p.kind] * SPM, 0.42);
   };
 
   // ---------- accesorios ----------
