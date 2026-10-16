@@ -146,6 +146,20 @@
       this.iconDrop(ctx, x + bw + 12, by + 2, p.thirst < 20 ? '#70b0f0' : '#5a90c8');
       this.bar(ctx, x + bw + 19, by, bw - 11, 4, p.thirst / 100, p.thirst < 20 ? '#4a90e0' : '#3a78b8');
       ctx.globalAlpha = 1;
+      // sigilo: ondas de ruido (vacías = silencio) y ojo rojo si algún zombie te está viendo
+      {
+        const nx = x + w * 0.75 + 14, ny = y + 31, nz = p.noise || 0;
+        const seen = g.zombies.some((z) => !z.dead && z.seesPlayer);
+        ctx.lineWidth = 1.6;
+        for (let i = 0; i < 3; i++) {
+          const on = nz > 0.03 + i * 0.33;
+          ctx.strokeStyle = on ? (i === 2 ? '#e0a050' : '#d8d0b8') : 'rgba(216,208,184,0.22)';
+          ctx.beginPath(); ctx.arc(nx, ny, 3 + i * 3.2, -0.7, 0.7); ctx.stroke();
+        }
+        ctx.fillStyle = seen ? `rgba(230,60,40,${0.75 + 0.25 * Math.sin(t * 9)})` : 'rgba(216,208,184,0.3)';
+        ctx.beginPath(); ctx.ellipse(nx + 20, ny, 5.5, 3.2, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.beginPath(); ctx.arc(nx + 20, ny, 1.6, 0, Math.PI * 2); ctx.fill();
+      }
 
       // estados
       let sx = x, sy = y + 52;

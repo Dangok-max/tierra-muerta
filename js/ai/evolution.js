@@ -102,7 +102,8 @@
     const dng = Math.min(danger, 4) + Math.max(0, danger - 4) * 0.25;
     const hpMul = (1 + HP_LOG * Math.log(1 + (day - 1) / HP_DAYS)) * (1 + HP_DANGER * dng) * (1 + mh);
     const spdMul = (1 + SPEED_LOG * Math.log(1 + (day - 1) / 5)) * (1 + ms) * (1 + 0.03 * Math.min(dng, 4));
-    const dmgMul = (1 + DMG_LOG * Math.log(1 + (day - 1) / 8)) * (1 + 0.06 * dng) * (1 + md);
+    const earlyDmg = day <= 1 ? 0.6 : day === 2 ? 0.75 : day === 3 ? 0.9 : 1; // días 1–3 más suaves
+    const dmgMul = (1 + DMG_LOG * Math.log(1 + (day - 1) / 8)) * (1 + 0.06 * dng) * (1 + md) * earlyDmg;
 
     const rl = prof.rangeLevel || 0;
     const farLv = Math.max(0, rl), nearLv = Math.max(0, -rl);

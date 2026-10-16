@@ -533,10 +533,10 @@
       if (this.seesPlayer) {
         this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
         if (!this.alerted) this._onSpot(g, dir);
-      } else if (d < (50 + 230 * (p.noise || 0)) * this.s.hearing * (this.state === 'dormant' ? DORMANT_HEAR : 1)) {
+      } else if ((p.noise || 0) > 0.01 && d < (30 + 230 * p.noise) * this.s.hearing * (this.state === 'dormant' ? DORMANT_HEAR : 1)) {
         // oye pasos cercanos (sin pasar por paredes gruesas: si hay muro entre medias, la mitad)
         const w = g.world;
-        if (d < (25 + 115 * (p.noise || 0)) * this.s.hearing || !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y)) {
+        if (d < (15 + 115 * (p.noise || 0)) * this.s.hearing || !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y)) {
           this.lkX = p.x; this.lkY = p.y;
           if (this.alerted) this.unseenT = Math.min(this.unseenT, 0.5);
           else if (this.state === 'wander' || this.state === 'search' || this.state === 'dormant') {

@@ -339,7 +339,9 @@
       const dF = 1 + 0.45 * Math.min(danger, 3) + 0.1 * Math.max(0, danger - 3);
       const S = safeR();
       const campF = lerp(lerp(0.06, 0.45, dark), 1, smoothstep(S * 1.1, S * 4.5, Math.hypot(p.x, p.y)));
-      return Math.min(this._maxZ(), Math.round(base * nightF * rainF * dF * campF));
+      // días 1–3 más suaves: el jugador aprende antes de que la cosa se ponga seria
+      const earlyF = day <= 1 ? 0.55 : day === 2 ? 0.7 : day === 3 ? 0.85 : 1;
+      return Math.min(this._maxZ(), Math.round(base * nightF * rainF * dF * campF * earlyF));
     }
 
     _pickType(counts) {

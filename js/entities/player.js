@@ -134,7 +134,8 @@
       this.bodyAngle += U.angDiff(this.bodyAngle, this.aimAngle) * Math.min(1, 18 * dt);
 
       // --- Ruido y pasos ---
-      this.noise = this.sprinting ? 1 : this.moving ? 0.35 * mv.mag : 0;
+      // sigilo: caminar casi no se oye (más cuanto más rápido), correr sí; quieto = silencio
+      this.noise = this.sprinting ? 1 : this.moving ? 0.1 * mv.mag * mv.mag : 0;
       if (this.moving) {
         this.walkPhase += sp * dt * 0.09;
         this.stepAcc += sp * dt;

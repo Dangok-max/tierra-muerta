@@ -231,9 +231,10 @@
       this.changed();
     }
 
-    // Equipo inicial: pistola, algo de 9 mm, 1 venda, 1 agua, 1 lata
+    // Equipo inicial: cuchillo, pistola, algo de 9 mm, 1 venda, 1 agua, 1 lata
     giveStarter() {
       this.slots = [];
+      this.add({ id: 'knife', qty: 1, dur: 1 });
       this.add({ id: 'pistol', qty: 1, mag: 12 });
       this.add({ id: 'ammo_9mm', qty: 12 });
       this.add({ id: 'venda', qty: 1 });
