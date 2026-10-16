@@ -1,0 +1,2988 @@
+diff --git a/css/inventory.css b/css/inventory.css
+index 5279754..ca7cd29 100644
+--- a/css/inventory.css
++++ b/css/inventory.css
+@@ -114,6 +114,24 @@
+ .cr-row.locked { opacity: 0.55; }
+ .cr-row.locked .cr-st { background: #2a3a5a; color: #c0d0f0; }
+ .cr-row.sel { outline: 2px solid #e8c070; outline-offset: -1px; }
++/* Habilidades */
++.sk-row {
++  display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto auto; column-gap: 8px; row-gap: 3px;
++  padding: 6px 10px; text-align: left; background: #24201c; border: 1px solid #3a332c; border-radius: 6px; color: #e0d8c8;
++  border-left: 4px solid var(--skc, #888);
++}
++.sk-row.sel { outline: 2px solid #e8c070; outline-offset: -1px; }
++.sk-row.up { animation: skUp 0.6s ease-in-out 4 alternate; }
++@keyframes skUp { to { background: #3a3428; } }
++.sk-name { font-size: 14px; font-weight: 800; }
++.sk-lv { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-size: 22px; font-weight: 900; color: var(--skc, #ddd); min-width: 26px; text-align: right; }
++.sk-pips { display: flex; gap: 3px; }
++.sk-pips i { flex: 1; height: 6px; max-width: 22px; border-radius: 2px; background: #0b0a09; border: 1px solid #3a332c; }
++.sk-pips i.on { background: var(--skc, #ccc); border-color: transparent; }
++.sk-xp { grid-column: 1 / span 2; height: 3px; background: #0b0a09; border-radius: 2px; overflow: hidden; }
++.sk-xp i { display: block; height: 100%; background: var(--skc, #ccc); opacity: 0.75; }
++.sk-ok { color: #a8d890; } .sk-no { color: #8a8070; }
++
+ .cr-need { display: flex; flex-direction: column; gap: 4px; }
+ .need { display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 2px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.25); }
+ .need img { width: 30px; height: 30px; flex: none; }
+@@ -177,10 +195,15 @@
+   .inv-box { height: 100vh; width: 100vw; border: 0; border-radius: 0; }
+   .inv-head { height: 44px; }
+   .inv-tab { height: 36px; padding: 0 12px; }
++  .sk-row { padding: 4px 8px; row-gap: 2px; }
+   .inv-detail { padding: 8px 10px; gap: 6px; }
+   .d-head img { width: 46px; height: 46px; }
+   .ibtn { min-height: 40px; }
+ }
++@media (max-width: 800px) {
++  .inv-tab { padding: 0 9px; font-size: 13px; letter-spacing: 0.03em; }
++  .inv-wbar { flex-basis: 70px; }
++}
+ @media (max-width: 700px) {
+   .inv-wbar { flex-basis: 90px; }
+   .inv-detail { min-width: 210px; max-width: 250px; }
+diff --git a/js/ai/director.js b/js/ai/director.js
+index a7f6a5c..6493a82 100644
+--- a/js/ai/director.js
++++ b/js/ai/director.js
+@@ -57,6 +57,18 @@
+   const NOISE_AMBUSH = { shot: 1, scream: 1, impact: 1, explosion: 1, chest_alarm: 1 };
+   const MUFFLE = 0.6;              // ruido a través de paredes (otro edificio / dentro↔fuera)
+ 
++  // ---- campos de flujo hacia un punto (investigar ruidos) ----
++  const PFLOW_POOL = 3;            // campos simultáneos
++  const PFLOW_CELLS = 48;          // 48 × 16 u = 24 m de lado
++  const PFLOW_REUSE = 48;          // un campo vale para puntos a menos de 1,5 m de su centro
++  const PFLOW_AGE = 3;             // s antes de recalcularlo (puertas que se abren o rompen)
++  const LOUD = { shot: 1, explosion: 1, chest_alarm: 1, scream: 1, door_bash: 1, glass: 1 };
++  // ---- primeros días más suaves (índice = día; a partir del 4 sin cambios) ----
++  const EARLY_POP = [null, 0.55, 0.7, 0.85];      // población objetivo
++  const EARLY_RATE = [null, 0.55, 0.7, 0.85];     // ritmo de aparición
++  const EARLY_RELAX = [null, 1.6, 1.4, 1.2];      // duración de la calma
++  const EARLY_INTENS = [null, 0.6, 0.7, 0.85];    // intensidad necesaria para la calma
++
+   const KINDS = ['bullet', 'melee', 'fire', 'explosion'];
+   const KIND_MAP = {
+     bullet: 'bullet', shot: 'bullet', pistol: 'bullet', rifle: 'bullet', shotgun: 'bullet',
+@@ -130,6 +142,11 @@
+       this.flowBig = TM.FlowField ? new TM.FlowField(80, 80, 16) : null;
+       if (this.flowBig) { this.flowBig.inflate = BIG_INFLATE; this.flowBig.minDoor = 44; } // el tanque (r 20) no cabe por puertas de 34–38 u
+       this._needBig = false;
++      // campos locales hacia un punto (ruido investigado, último punto visto): no hacia el jugador
++      this.pFlows = [];
++      if (TM.FlowField) for (let i = 0; i < PFLOW_POOL; i++) { const f = new TM.FlowField(PFLOW_CELLS, PFLOW_CELLS, 16); f.cx = 1e9; f.cy = 1e9; f.t = -99; this.pFlows.push(f); }
++      this.pfBudget = 1;
++      this.lastLoud = null;       // { x, y, t }: último ruido fuerte (disparo, explosión...) para el deambular
+       this.stage = 1;
+       this._lastDay = null;
+       this.clock = 0;
+@@ -202,6 +219,7 @@
+       this.frame++;
+       this.hordeCd -= dt;
+       this.groanBudget = Math.min(2, this.groanBudget + dt * 1.2);
++      this.pfBudget = 1;
+       const zs = this.list();
+       const pAlive = p.alive !== false;
+ 
+@@ -267,8 +285,9 @@
+       this._lastHp = p.hp;
+       this.intensity = Math.max(0, this.intensity - dt * 0.025);
+       this.relaxT -= dt;
+-      if (this.intensity >= 1 && this.relaxT <= 0) {
+-        this.relaxT = rr(RELAX_TIME[0], RELAX_TIME[1]) * (this.stage >= 3 ? 0.7 : 1) * (1 - 0.35 * (this.game.darkness || 0));
++      const day = this.game.day || 1;
++      if (this.intensity >= (EARLY_INTENS[day] || 1) && this.relaxT <= 0) {
++        this.relaxT = rr(RELAX_TIME[0], RELAX_TIME[1]) * (this.stage >= 3 ? 0.7 : 1) * (1 - 0.35 * (this.game.darkness || 0)) * (EARLY_RELAX[day] || 1);
+         this.intensity = 0.5;
+       }
+     }
+@@ -333,7 +352,8 @@
+       const g = this.game, p = g.player, w = g.world, day = g.day || 1;
+       const dark = g.darkness || 0, rain = (g.weather && g.weather.rain) || 0;
+       const danger = w && w.dangerAt ? w.dangerAt(p.x, p.y) : 0;
+-      const base = 7 + 1.2 * Math.min(day - 1, 15) + 0.3 * Math.max(0, day - 16);
++      // días 1–3 más suaves (EARLY_POP); después sube como antes: día 4 ≈ 10,6, día 16 ≈ 25, luego +0,3/día
++      const base = (7 + 1.2 * Math.min(day - 1, 15) + 0.3 * Math.max(0, day - 16)) * (EARLY_POP[day] || 1);
+       const nightF = 1 + 0.6 * dark * (1 + 0.12 * this.profile.nightLevel);
+       const rainF = 1 + 0.25 * rain;
+       const dF = 1 + 0.45 * Math.min(danger, 3) + 0.1 * Math.max(0, danger - 3);
+@@ -392,7 +412,7 @@
+     _spawnRate() {
+       const g = this.game, p = g.player, w = g.world;
+       const danger = w && w.dangerAt ? w.dangerAt(p.x, p.y) : 0;
+-      let r = SPAWN_RATE[Math.min(this.stage, 4)] * (1 + 0.5 * (g.darkness || 0)) * (1 + 0.25 * Math.min(danger, 3));
++      let r = SPAWN_RATE[Math.min(this.stage, 4)] * (1 + 0.5 * (g.darkness || 0)) * (1 + 0.25 * Math.min(danger, 3)) * (EARLY_RATE[g.day || 1] || 1);
+       if (this.relaxT > 0) r *= 0.4;
+       return r;
+     }
+@@ -502,11 +522,13 @@
+       const infected = !!h.infected;
+       const m2 = (b.w * b.h) / (32 * 32);
+       let n;
+-      if (infected) n = Math.min(12, ri(3, 5) + Math.min(this.stage - 1, 2) + Math.floor(m2 / 120));
++      const early = EARLY_POP[g.day || 1] || 1;
++      if (infected) n = Math.max(2, Math.round(Math.min(12, ri(3, 5) + Math.min(this.stage - 1, 2) + Math.floor(m2 / 120)) * (0.5 + 0.5 * early)));
+       else {
+         let chance = (0.28 + 0.12 * Math.min(danger, 3)) * (strong ? 1.6 : bt === 'house' || bt === 'farmhouse' ? 0.8 : 1);
+         if (b.infected) chance *= 1.5;
+         if (this.relaxT > 0) chance *= 0.6;
++        chance *= early;
+         if (Math.random() > Math.min(0.9, chance)) return 0;
+         n = 1 + (Math.random() < 0.2 + 0.1 * Math.min(danger, 3) ? 1 : 0) + (strong ? ri(0, 2) : 0);
+       }
+@@ -830,6 +852,7 @@
+       const nb = w && w.buildingAt ? w.buildingAt(x, y) : null;
+       const nbId = nb ? nb.id : null;
+       const scream = kind === 'scream';
++      if (LOUD[kind] && radius >= 300) this.lastLoud = { x, y, t: this.clock };
+       for (let i = 0; i < zs.length; i++) {
+         const z = zs[i];
+         if (z.dead || z.remove) continue;
+@@ -848,6 +871,23 @@
+       }
+     }
+ 
++    // Campo de flujo local hacia (x, y) para ir a un punto que NO es el jugador (investigar un ruido...).
++    // Reutiliza uno cercano y reciente; como mucho se calcula uno nuevo por frame (null = ve en línea recta).
++    pointFlow(x, y) {
++      const P = this.pFlows, now = this.clock;
++      let old = null;
++      for (let i = 0; i < P.length; i++) {
++        const f = P[i];
++        if (f.valid && now - f.t < PFLOW_AGE && Math.abs(f.cx - x) < PFLOW_REUSE && Math.abs(f.cy - y) < PFLOW_REUSE) return f;
++        if (!old || f.t < old.t) old = f;
++      }
++      if (!old || this.pfBudget <= 0) return null;
++      this.pfBudget--;
++      old.compute(this.game.world, x, y);
++      old.cx = x; old.cy = y; old.t = now;
++      return old.valid ? old : null;
++    }
++
+     // Avisa a los cercanos cuando uno descubre al jugador
+     alertNear(src, radius) {
+       const zs = this.list(), p = this.game.player;
+diff --git a/js/ai/evolution.js b/js/ai/evolution.js
+index 7385306..8dc0a82 100644
+--- a/js/ai/evolution.js
++++ b/js/ai/evolution.js
+@@ -34,6 +34,9 @@
+   const RUN_CHANCE = [0, 0, 0.35, 0.45, 0.55]; // por etapa (normales corredores)
+   const DODGE = [0, 0, 0.4, 0.5, 0.55];        // probabilidad de esquivar al ser apuntado
+   const COVER = [0, 0, 0.3, 0.4, 0.45];        // probabilidad de buscar cobertura
++  // Primeros días más suaves (índice = día): golpean menos y más despacio. Desde el día 4, valores normales.
++  const EARLY_DMG = [null, 0.6, 0.72, 0.86];
++  const EARLY_CD = [null, 1.3, 1.2, 1.1];
+ 
+   function stageOf(day) {
+     day = Math.max(1, day | 0);
+@@ -110,7 +113,8 @@
+     const speed = Math.min((st >= 2 ? b.walk2 : b.walk) * spdMul, SPEED_CAP[type] || 999);
+     const runSpeed = Math.min(b.run * spdMul, SPEED_CAP.runner);
+     let runChance = 0;
+-    if (type === 'normal' && st >= 2) runChance = Math.min(0.75, RUN_CHANCE[Math.min(st, 4)] + 0.08 * farLv);
++    // corredores desde la etapa 2, entrando poco a poco (día 6 ≈ 55 %, día 9 = 100 % de la tasa de la etapa)
++    if (type === 'normal' && st >= 2) runChance = Math.min(0.75, RUN_CHANCE[Math.min(st, 4)] * Math.min(1, 0.55 + 0.15 * (day - 6)) + 0.08 * farLv);
+ 
+     const res = prof.resist || {};
+     return {
+@@ -119,8 +123,8 @@
+       hp: Math.round(b.hp * hpMul),
+       speed, runSpeed, runChance,
+       speedVar: type === 'tanque' ? 0.06 : 0.16,
+-      damage: b.dmg * dmgMul,
+-      attackCooldown: b.cd * (st === 1 ? 1.2 : st >= 3 ? 0.9 : 1),
++      damage: b.dmg * dmgMul * (EARLY_DMG[day] || 1),
++      attackCooldown: b.cd * (st === 1 ? 1.2 : st >= 3 ? 0.9 : 1) * (EARLY_CD[day] || 1),
+       windup: st === 1 ? b.windup + 0.08 : b.windup,   // etapa 1: telegrafiado más largo
+       reach: b.reach,
+       sight: b.sight, hearing: b.hearing,
+@@ -152,11 +156,12 @@
+     const rl = prof.rangeLevel || 0;
+     const dk = 1 + 0.25 * Math.min(Math.max(0, danger || 0), 3);
+     const w = { normal: 1, acechador: 0, griton: 0, tanque: 0 };
+-    if (day >= 2) {
+-      w.acechador = ((0.025 + (0.14 - 0.025) * night) + (st >= 2 ? 0.04 : 0)) * (1 + 0.6 * nl * night) * dk;
++    // días 1–2 solo caminantes; acechadores y gritones desde el 3 (pocos), tanques desde el 5
++    if (day >= 3) {
++      w.acechador = ((0.025 + (0.14 - 0.025) * night) + (st >= 2 ? 0.04 : 0)) * (1 + 0.6 * nl * night) * dk * (day === 3 ? 0.5 : 1);
++      w.griton = (st >= 2 ? 0.07 : day === 3 ? 0.03 : 0.05) * dk;
+     }
+-    if (day >= 3) w.griton = (st >= 2 ? 0.07 : 0.05) * dk;
+-    if (day >= 4) w.tanque = (st >= 3 ? 0.07 : st >= 2 ? 0.05 : 0.03) * (1 + 0.5 * Math.max(0, -rl)) * dk;
++    if (day >= 5) w.tanque = (st >= 3 ? 0.07 : st >= 2 ? 0.05 : 0.03) * (1 + 0.5 * Math.max(0, -rl)) * dk;
+     return w;
+   }
+ 
+diff --git a/js/core/input.js b/js/core/input.js
+index 67039cf..1e46926 100644
+--- a/js/core/input.js
++++ b/js/core/input.js
+@@ -267,6 +267,8 @@
+       const d = Math.hypot(mx, my);
+       if (d > 0) { mx /= d; my /= d; mmag = 1; }
+       sprint = mmag > 0 && !!(k.ShiftLeft || k.ShiftRight);
++      // C (mantener): caminar en sigilo, despacio y en silencio (Ctrl no: Ctrl+W cierra la pestaña)
++      if (mmag > 0 && !sprint && k.KeyC) mmag = 0.5;
+     }
+     this.move.x = mx; this.move.y = my; this.move.mag = mmag; this.move.sprint = sprint;
+ 
+diff --git a/js/entities/combat.js b/js/entities/combat.js
+index 0fe7182..2a3c0ec 100644
+--- a/js/entities/combat.js
++++ b/js/entities/combat.js
+@@ -53,6 +53,8 @@
+     }
+ 
+     get inv() { const p = this.game.player; return p && p.inventory; }
++    get skills() { const p = this.game.player; return p && p.skills; }
++    xp(id, n) { const sk = this.skills; if (sk) sk.gain(id, n); }
+     get weaponId() { const inv = this.inv; return inv ? inv.activeWeaponId() : 'pistol'; }
+     get weapon() { return WEAPONS[this.weaponId] || WEAPONS.fists; }
+     get gunStack() { const inv = this.inv; const s = inv && !inv.ready ? inv.equipped : null; return s && WEAPONS[DB()[s.id].weapon].kind === 'gun' ? s : null; }
+@@ -166,7 +168,7 @@
+         return false;
+       }
+       this.reloading = true;
+-      this.reloadT = this.reloadMax = w.reloadTime;
++      this.reloadT = this.reloadMax = w.reloadTime * (this.skills ? this.skills.reloadMul() : 1);
+       if (TM.Audio) TM.Audio.play('reload', p.x, p.y, w.perRound ? { volume: 0.6, pitch: 1.2 } : undefined);
+       return true;
+     }
+@@ -180,7 +182,7 @@
+       if (w.perRound) {
+         if (inv.remove(w.ammo, 1)) s.mag++;
+         if (s.mag < w.magSize && inv.count(w.ammo) > 0) {
+-          this.reloadT = this.reloadMax = w.reloadTime;
++          this.reloadT = this.reloadMax = w.reloadTime * (this.skills ? this.skills.reloadMul() : 1);
+           if (TM.Audio) TM.Audio.play('reload', p.x, p.y, { volume: 0.5, pitch: 1.25 });
+         } else this.reloading = false;
+       } else {
+@@ -218,7 +220,8 @@
+       p.aimHold = 0.6;
+ 
+       const base = this.assist(p.aimAngle, w.range, w.pellets > 1 ? 0.22 : 0.16);
+-      const moveSpread = p.moving ? (w.moveSpread || 1.6) : 1;
++      const sk = this.skills;
++      const moveSpread = (p.moving ? (w.moveSpread || 1.6) : 1) * (sk ? sk.spreadMul() : 1);
+       const mx = p.x + Math.cos(base) * 24, my = p.y + Math.sin(base) * 24;
+       const hits = new Map();   // zombie -> daño acumulado (un solo takeDamage por zombie)
+       let wallHit = null;
+@@ -267,11 +270,13 @@
+       let anyKill = false, anyCrit = false;
+       for (const [z, h] of hits) {
+         const L = Math.hypot(h.dx, h.dy) || 1;
+-        const crit = U.chance(w.crit || 0);
++        const crit = U.chance((w.crit || 0) + (w.crit && sk ? sk.critAdd() : 0));
+         if (crit) { anyCrit = true; g.fx.floatText(z.x, z.y - 18, '¡CRÍTICO!', '#e8c070'); }
+         const killed = z.takeDamage(h.dmg * (crit ? 2 : 1), 'bullet', h.dx / L, h.dy / L);
+         if (killed) anyKill = true;
+       }
++      // Puntería: sube sobre todo acertando (un poco al fallar)
++      this.xp('aim', hits.size ? 3 + (anyKill ? 3 : 0) : 0.4);
+       if (hits.size) {
+         this.shotsHit++;
+         if (anyKill) g.hitstop(w.pellets > 1 || w.pierce ? 0.045 : 0.035);
+@@ -316,9 +321,11 @@
+ 
+     startSwing(w) {
+       const g = this.game, p = g.player;
+-      const tired = p.stamina < w.stamina;
+-      if (!tired) { p.stamina -= w.stamina; p.staminaDelay = 0.5; }
+-      this.cooldown = w.fireDelay * (tired ? 1.5 : 1);
++      const sk = this.skills;
++      const cost = w.stamina * (sk ? sk.meleeStamMul() : 1);
++      const tired = p.stamina < cost;
++      if (!tired) { p.stamina -= cost; p.staminaDelay = 0.5; }
++      this.cooldown = w.fireDelay * (tired ? 1.5 : 1) * (sk ? sk.meleeRateMul() : 1);
+       const ang = this.meleeAssist(p.aimAngle, w);
+       p.aimAngle = ang;
+       p.aimHold = 0.5;
+@@ -345,16 +352,20 @@
+       }
+       targets.sort((a, b) => a.d - b.d);
+       let hits = 0, kills = 0;
++      const sk = this.skills;
+       for (let i = 0; i < targets.length && i < w.maxHits; i++) {
+         const { z, za } = targets[i];
+         const nx = Math.cos(za), ny = Math.sin(za);
+-        let dmg = w.damage * U.randRange(0.9, 1.1) * (s.tired ? 0.6 : 1) * (i ? 0.75 : 1);
+-        // sigilo: golpe a un zombie que no te ha visto
+-        if (!z.alerted && !z.fakeDead) {
+-          dmg *= w.stealth || 1.5;
++        let dmg = w.damage * U.randRange(0.9, 1.1) * (s.tired ? 0.6 : 1) * (i ? 0.75 : 1) * (sk ? sk.meleeDmgMul() : 1);
++        // sigilo: golpe a un zombie que no te ha visto (cuchillo ×3; Sigilo suma hasta +1)
++        const sneak = !z.alerted && !z.fakeDead;
++        if (sneak) {
++          dmg *= (w.stealth || 1.5) + (sk ? sk.stealthBonus() : 0);
+           g.fx.floatText(z.x, z.y - 20, '¡SIGILO!', '#a8d0a0');
+         }
+         const killed = z.takeDamage(dmg, 'melee', nx, ny);
++        if (sneak) this.xp('stealth', killed ? 14 : 6);
++        this.xp('melee', killed ? 6 : 3);
+         if (killed) kills++;
+         else if (w.knock) z.shove(nx, ny, w.knock * (s.tired ? 0.6 : 1));
+         g.fx.spark(z.x - nx * z.r, z.y - ny * z.r, -nx, -ny, 3);
+@@ -434,6 +445,7 @@
+         z.shove(nx, ny, 340);
+         z.takeDamage(7, 'melee', nx, ny);
+         hits++;
++        this.xp('melee', 0.8);
+       }
+       g.fx.swipe(p.x, p.y, ang);
+       if (TM.Audio) TM.Audio.play('shove', p.x, p.y, { volume: hits ? 1 : 0.5 });
+diff --git a/js/entities/player.js b/js/entities/player.js
+index dd77aeb..7034d0d 100644
+--- a/js/entities/player.js
++++ b/js/entities/player.js
+@@ -20,6 +20,95 @@
+   const REGEN_FED = 0.1;      // vida/s bien alimentado (antes 1,5)
+   const REGEN_CAMP = 0.8;     // vida/s junto a la fogata
+ 
++  // ---------- Ruido de pasos (u; 32 u = 1 m). Los zombies solo oyen lo que se emite con game.emitNoise ----------
++  const SNEAK_MAG = 0.6;      // joystick desplazado ≤ 60 % (≤ 90 u/s): pasos silenciosos
++  const WALK_NOISE = 48;      // caminar normal: ~1,5 m
++  const RUN_NOISE = 330;      // correr: ~10 m (la habilidad Sigilo lo reduce hasta un 45 %)
++
++  // ---------- Habilidades (suben con el uso, niveles 0..10) ----------
++  const SKILLS = [
++    { id: 'aim', name: 'Puntería', color: '#e8c070', desc: 'Sube disparando y acertando. Menos dispersión, recarga más rápida y más críticos.' },
++    { id: 'melee', name: 'Cuerpo a cuerpo', color: '#e08a6a', desc: 'Sube golpeando. Más daño, menos estamina por golpe y golpes más rápidos.' },
++    { id: 'stealth', name: 'Sigilo', color: '#9ad0a0', desc: 'Sube moviéndote cerca de ellos sin que te vean y matando por la espalda. Menos ruido al correr y te ven peor.' },
++    { id: 'fitness', name: 'Atletismo', color: '#d8c890', desc: 'Sube corriendo. Más estamina, corres más rápido y te cansas menos.' },
++    { id: 'survival', name: 'Supervivencia', color: '#80b8e8', desc: 'Sube curándote, comiendo, fabricando y registrando. Vendas y comida rinden más, gastas menos y aprendes recetas.' },
++  ];
++  const SKILL_MAX = 10;
++  // XP para pasar del nivel lv al lv+1: 25, 68, 120, 179, 245, 319, 400, 489, 585, 689 (≈ 2900 en total)
++  function xpNeed(lv) { return Math.round(25 * (lv + 1) * (1 + lv * 0.35)); }
++
++  class Skills {
++    constructor() {
++      this.xp = {}; this.lv = {};
++      for (const s of SKILLS) { this.xp[s.id] = 0; this.lv[s.id] = 0; }
++      this.version = 0;
++      this.flash = {};               // id -> segundos de brillo tras subir de nivel (HUD/mochila)
++    }
++    level(id) { return this.lv[id] || 0; }
++    progress(id) { const l = this.level(id); return l >= SKILL_MAX ? 1 : U.clamp(this.xp[id] / xpNeed(l), 0, 1); }
++    gain(id, amount) {
++      if (!(amount > 0) || this.lv[id] === undefined || this.lv[id] >= SKILL_MAX) return;
++      this.xp[id] += amount;
++      let up = false;
++      while (this.lv[id] < SKILL_MAX && this.xp[id] >= xpNeed(this.lv[id])) {
++        this.xp[id] -= xpNeed(this.lv[id]);
++        this.lv[id]++;
++        up = true;
++      }
++      if (this.lv[id] >= SKILL_MAX) this.xp[id] = 0;
++      this.version++;
++      if (up) this.onLevelUp(id);
++    }
++    onLevelUp(id) {
++      const def = Skills.def(id), lv = this.lv[id], g = TM.game;
++      this.flash[id] = 3;
++      if (!g) return;
++      g.notify(`¡${def.name} sube a nivel ${lv}!`, def.color);
++      const p = g.player;
++      if (p && g.fx) g.fx.floatText(p.x, p.y - 30, `${def.name.toUpperCase()} ${lv}`, def.color);
++      if (id === 'fitness' && p) p.maxStamina = this.maxStamina();
++      if (id === 'survival' && TM.Crafting && TM.Crafting.RECIPES) {
++        const names = TM.Crafting.RECIPES.filter((r) => r.skill && r.skill[0] === 'survival' && r.skill[1] === lv).map((r) => r.label || TM.Items.name(r.out[0]));
++        if (names.length && g.later) g.later(1800, () => g.notify('Nueva receta: ' + names.join(', '), '#80b8e8'));
++      }
++    }
++    update(dt) { for (const k in this.flash) { this.flash[k] -= dt; if (this.flash[k] <= 0) delete this.flash[k]; } }
++
++    // ---- efectos (moderados; a nivel 10 compensan aproximadamente la evolución de los zombies hasta el día ~30) ----
++    spreadMul() { return 1 - 0.04 * this.level('aim'); }          // −40 % dispersión
++    reloadMul() { return 1 - 0.03 * this.level('aim'); }          // −30 % tiempo de recarga
++    critAdd() { return 0.01 * this.level('aim'); }                 // +10 % crítico
++    meleeDmgMul() { return 1 + 0.04 * this.level('melee'); }      // +40 % daño
++    meleeStamMul() { return 1 - 0.04 * this.level('melee'); }     // −40 % estamina por golpe
++    meleeRateMul() { return 1 - 0.02 * this.level('melee'); }     // −20 % entre golpes
++    noiseMul() { return 1 - 0.045 * this.level('stealth'); }      // −45 % ruido al correr
++    sightMul() { return 1 - 0.03 * this.level('stealth'); }       // −30 % distancia a la que te ven
++    stealthBonus() { return 0.1 * this.level('stealth'); }        // +1 al multiplicador de sigilo
++    maxStamina() { return 100 + 5 * this.level('fitness'); }      // 150
++    sprintMul() { return 1 + 0.012 * this.level('fitness'); }     // +12 % al correr
++    drainMul() { return 1 - 0.03 * this.level('fitness'); }       // −30 % gasto al correr
++    healMul() { return 1 + 0.05 * this.level('survival'); }       // +50 % curación de medicinas
++    foodMul() { return 1 + 0.03 * this.level('survival'); }       // +30 % comida/agua
++    needsMul() { return 1 - 0.025 * this.level('survival'); }     // −25 % hambre/sed
++
++    serialize() { return { v: 1, xp: Object.assign({}, this.xp), lv: Object.assign({}, this.lv) }; }
++    deserialize(d) {
++      if (!d || typeof d !== 'object') return;
++      for (const s of SKILLS) {
++        const l = d.lv && Number.isFinite(d.lv[s.id]) ? U.clamp(d.lv[s.id] | 0, 0, SKILL_MAX) : 0;
++        const x = d.xp && Number.isFinite(d.xp[s.id]) ? Math.max(0, d.xp[s.id]) : 0;
++        this.lv[s.id] = l;
++        this.xp[s.id] = l >= SKILL_MAX ? 0 : Math.min(x, xpNeed(l) - 0.01);
++      }
++      this.version++;
++    }
++    static def(id) { return SKILLS.find((s) => s.id === id); }
++  }
++  Skills.LIST = SKILLS;
++  Skills.MAX = SKILL_MAX;
++  Skills.xpNeed = xpNeed;
++  TM.Skills = Skills;
++
+   class Player {
+     constructor(name) {
+       this.name = name || 'Superviviente';
+@@ -38,7 +127,12 @@
+       this.flashlightOn = true;
+       this.sprinting = false;
+       this.moving = false;
+-      this.noise = 0;
++      this.noise = 0;                 // 0..1 (noiseRadius / RUN_NOISE), para compatibilidad
++      this.noiseRadius = 0;           // radio (u) del ruido de los pasos de este frame
++      this.sneaking = false;          // moviéndose despacio (joystick poco desplazado) o quieto
++      this.sightMul = 1;              // multiplicador de la distancia a la que lo ven (agachado, Sigilo)
++      this.skills = new Skills();
++      this._sneakT = 0;
+       this.lastDamageTime = -999;
+       this.hurtFlash = 0;
+       this.walkPhase = 0;
+@@ -89,7 +183,9 @@
+       const canRun = !game.combat.reloading && !this.action && (!inv || inv.canSprint());
+       const wantsSprint = mv.sprint && mv.mag > 0.5 && this.stamina > 2 && canRun;
+       this.sprinting = wantsSprint && (this.sprinting || this.stamina > 15);
+-      let speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * mv.mag;
++      const sk = this.skills;
++      this.maxStamina = sk.maxStamina();
++      let speed = (this.sprinting ? SPRINT_SPEED * sk.sprintMul() : WALK_SPEED) * mv.mag;
+       if (In.aim.active && !this.sprinting) speed *= 0.86;
+       if (game.combat.reloading) speed *= 0.9;
+       if (this.action) speed *= 0.55;
+@@ -113,8 +209,9 @@
+       if (this.infection > 0.25) regen *= 0.6;
+       if (this.hunger < 15 || this.thirst < 15) regen *= 0.65;
+       if (this.sprinting && this.moving) {
+-        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * (inv && inv.load() > 1 ? 1.4 : 1) * dt);
++        this.stamina = Math.max(0, this.stamina - STAMINA_DRAIN * sk.drainMul() * (inv && inv.load() > 1 ? 1.4 : 1) * dt);
+         this.staminaDelay = 0.7;
++        sk.gain('fitness', 0.5 * dt);
+         if (this.stamina <= 0) this.sprinting = false;
+       } else if (this.staminaDelay > 0) this.staminaDelay -= dt;
+       else this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
+@@ -134,17 +231,40 @@
+       this.bodyAngle += U.angDiff(this.bodyAngle, this.aimAngle) * Math.min(1, 18 * dt);
+ 
+       // --- Ruido y pasos ---
+-      this.noise = this.sprinting ? 1 : this.moving ? 0.35 * mv.mag : 0;
++      // Quieto o despacio (joystick ≤ 60 %): silencioso. Caminar normal: ~1,5 m. Correr: ~10 m (menos con Sigilo).
++      // Ese radio es el ÚNICO modo en que los zombies "oyen" al jugador moverse (emitNoise 'footstep' en cada paso).
++      const running = this.sprinting && this.moving;
++      this.sneaking = !running && (!this.moving || mv.mag <= SNEAK_MAG + 1e-3);
++      let nr = 0;
++      if (running) nr = RUN_NOISE * sk.noiseMul();
++      else if (this.moving && !this.sneaking) nr = WALK_NOISE * U.clamp((mv.mag - SNEAK_MAG) / (1 - SNEAK_MAG), 0.3, 1) * (1 - 0.05 * sk.level('stealth'));
++      this.noiseRadius = nr;
++      this.noise = nr / RUN_NOISE;
++      // agachado/quieto: cuesta más verte; Sigilo también
++      this.sightMul = (this.sneaking ? 0.75 : 1) * sk.sightMul();
+       if (this.moving) {
+         this.walkPhase += sp * dt * 0.09;
+         this.stepAcc += sp * dt;
+         const stepLen = this.sprinting ? 52 : 44;
+         if (this.stepAcc > stepLen) {
+           this.stepAcc = 0;
+-          if (TM.Audio) TM.Audio.play('footstep', this.x, this.y, { volume: this.sprinting ? 0.5 : 0.28 });
+-          if (this.sprinting) game.emitNoise(this.x, this.y, 220, 'footstep');
++          if (TM.Audio) TM.Audio.play('footstep', this.x, this.y, { volume: this.sprinting ? 0.5 : this.sneaking ? 0.12 : 0.28 });
++          if (nr > 0) game.emitNoise(this.x, this.y, nr, 'footstep');
++        }
++      }
++      // Sigilo: moverse despacio cerca de zombies que no te han detectado
++      this._sneakT -= dt;
++      if (this._sneakT <= 0) {
++        this._sneakT = 0.5;
++        if (this.moving && this.sneaking && game.zombies) {
++          for (const z of game.zombies) {
++            if (z.dead || z.alerted || z.fakeDead || z.state === 'ambush') continue;
++            const dx = z.x - this.x, dy = z.y - this.y;
++            if (dx * dx + dy * dy < 230 * 230) { sk.gain('stealth', 0.6); break; }
++          }
+         }
+       }
++      sk.update(dt);
+ 
+       this.updateNeeds(dt, game);
+       this.updateAction(dt, game);
+@@ -159,7 +279,7 @@
+ 
+     // ---------- necesidades y estados ----------
+     updateNeeds(dt, game) {
+-      const act = this.sprinting && this.moving ? 1.7 : this.moving ? 1 : 0.7;
++      const act = (this.sprinting && this.moving ? 1.7 : this.moving ? 1 : 0.7) * this.skills.needsMul();
+       const biome = game.world.biomeAt ? game.world.biomeAt(this.x, this.y) : '';
+       const heat = biome === 'desert' && !game.isNight ? 1.35 : 1;
+       this.hunger = Math.max(0, this.hunger - HUNGER_RATE * act * dt);
+@@ -267,10 +387,15 @@
+       const d = TM.Items.DB[a.id];
+       inv.removeStack(a.stack, 1);
+       const parts = [];
+-      if (d.food) { this.hunger = U.clamp(this.hunger + d.food, 0, 100); parts.push(`+${d.food} comida`); }
+-      if (d.water) { this.thirst = U.clamp(this.thirst + d.water, 0, 100); if (d.water > 0) parts.push(`+${d.water} agua`); }
++      const sk = this.skills, fm = sk.foodMul();
++      if (d.food) { const f = Math.round(d.food * fm); this.hunger = U.clamp(this.hunger + f, 0, 100); parts.push(`+${f} comida`); }
++      if (d.water) { const wv = d.water > 0 ? Math.round(d.water * fm) : d.water; this.thirst = U.clamp(this.thirst + wv, 0, 100); if (wv > 0) parts.push(`+${wv} agua`); }
+       if (d.stam) this.stamina = Math.min(this.maxStamina, this.stamina + d.stam);
+-      if (d.heal) { const h = Math.min(d.heal, this.maxHp - this.hp); this.hp += h; if (h >= 1) parts.push(`+${Math.round(h)} vida`); }
++      if (d.heal) {
++        const h = Math.min(d.heal * (d.cat === 'med' ? sk.healMul() : 1), this.maxHp - this.hp);
++        this.hp += h; if (h >= 1) parts.push(`+${Math.round(h)} vida`);
++      }
++      sk.gain('survival', d.cat === 'med' ? 6 : 2.5);
+       if (d.stopBleed && this.bleedT > 0) { this.bleedT = 0; parts.push('sangrado detenido'); }
+       if (d.cureInf && this.infection > 0) { this.infection = 0; this._warn.inf = false; game.notify('La infección remite', '#8fc870'); }
+       if (d.pain) { this.painT = d.pain; parts.push('sin dolor'); }
+diff --git a/js/entities/zombie.js b/js/entities/zombie.js
+index ce22ec8..2ed2d90 100644
+--- a/js/entities/zombie.js
++++ b/js/entities/zombie.js
+@@ -71,10 +71,12 @@
+   const SIGHT_NIGHT_STALKER = 330;
+   const SIGHT_BEAM = 760;         // la linterna apuntándoles los delata a ~24 m
+   const SIGHT_LIGHT = 380;        // linterna encendida pero no hacia ellos (~12 m)
+-  const REAR_FEEL = 40;           // sin alerta: por detrás solo notan al jugador a ~1,25 m
++  const REAR_FEEL = 24;           // sin alerta: por detrás solo notan al jugador si los toca (sin "olfato")
+   const FOV_HALF = 1.75;          // semiángulo de visión sin alerta (~100°)
+   const DORMANT_SIGHT = 0.55;     // dormidos/quietos: ven peor
+   const DORMANT_HEAR = 0.6;       // y oyen peor
++  const AWARE_NEAR = 80;          // a menos de ~2,5 m (y viéndolo) lo detectan al instante
++  const FLOW_NEAR = 96;           // objetivo a menos de 3 m del jugador: vale el campo de flujo del jugador
+   // ruido: por debajo de esta fracción del radio, van con prisa a investigar
+   const NOISE_URGENT = { shot: 0.75, explosion: 0.9, chest_alarm: 0.7, glass: 0.55, door_bash: 0.45, shove: 1, impact: 0.35, flare: 0.3 };
+   const BASH_CD = [0.9, 1.4];     // s entre golpes a una puerta
+@@ -244,6 +246,7 @@
+       this.state = 'wander'; this.stateT = 0;
+       this.alerted = false;
+       this.seesPlayer = false;
++      this.aware = 0;                    // 0..1: sospecha antes de detectarlo (se llena viéndolo; a 1 lo detecta)
+       this.unseenT = 99;                 // segundos desde que vio al jugador
+       this.lkX = x; this.lkY = y;        // último punto conocido
+       this.urgent = false;
+@@ -445,7 +448,11 @@
+       if (kind === 'door_bash' && this.bashDoor) return;         // su propio golpe (o el de su grupo)
+       if (st === 'dormant' && frac > DORMANT_HEAR) return;      // adormilado: solo despierta con ruido cercano
+       if (this.seesPlayer) return;
+-      if (this.alerted && this.unseenT < LOSE_TRACK && kind !== 'flare') return; // lo está siguiendo: no se distrae
++      if (this.alerted && this.unseenT < LOSE_TRACK && kind !== 'flare') {
++        // lo está siguiendo: no se distrae, pero sus pasos le dicen por dónde va
++        if (kind === 'footstep' && frac < 0.8) { this.lkX = x; this.lkY = y; this.unseenT = Math.min(this.unseenT, 0.5); }
++        return;
++      }
+       this.lkX = x; this.lkY = y; // cada uno investiga alrededor con su propio desplazamiento (invOX/invOY)
+       if (PASSIVE[st]) {
+         this.urgent = frac < (NOISE_URGENT[kind] || 0);
+@@ -529,22 +536,34 @@
+       if (!pAlive) { this._thinkFeed(p, d); return; }
+ 
+       // percepción
+-      this.seesPlayer = this._canSee(g, p, d);
+-      if (this.seesPlayer) {
++      const sees = this._canSee(g, p, d);
++      if (sees && this.alerted) {
++        this.seesPlayer = true; this.aware = 1;
+         this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
+-        if (!this.alerted) this._onSpot(g, dir);
+-      } else if (d < (50 + 230 * (p.noise || 0)) * this.s.hearing * (this.state === 'dormant' ? DORMANT_HEAR : 1)) {
+-        // oye pasos cercanos (sin pasar por paredes gruesas: si hay muro entre medias, la mitad)
+-        const w = g.world;
+-        if (d < (25 + 115 * (p.noise || 0)) * this.s.hearing || !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y)) {
+-          this.lkX = p.x; this.lkY = p.y;
+-          if (this.alerted) this.unseenT = Math.min(this.unseenT, 0.5);
+-          else if (this.state === 'wander' || this.state === 'search' || this.state === 'dormant') {
+-            this.urgent = false; this.setState('investigate');
+-            this.angle = Math.atan2(dy, dx) + rr(-0.4, 0.4);
++      } else if (sees) {
++        // sin alerta: la sospecha se llena más rápido cuanto más cerca (a ≤ 2,5 m, al instante;
++        // en el límite de su vista, ~2 s). Si sospecha, se gira y se acerca a mirar sin prisa.
++        const k = d / (this._sightR || SIGHT_DAY);
++        const rate = d < AWARE_NEAR ? 99 : 1 / (0.3 + 1.7 * k);
++        this.aware = Math.min(1, this.aware + rate * this.lastThink * (this.state === 'dormant' ? 0.6 : 1));
++        if (this.aware >= 1) {
++          this.seesPlayer = true;
++          this.lkX = p.x; this.lkY = p.y; this.unseenT = 0;
++          this._onSpot(g, dir);
++        } else {
++          this.seesPlayer = false;
++          if (this.aware > 0.35 && PASSIVE[this.state]) {
++            this.lkX = p.x; this.lkY = p.y;
++            if (this.state !== 'investigate') { this.urgent = false; this.setState('investigate'); }
++            this.angle = Math.atan2(dy, dx);
+           }
+         }
++      } else {
++        this.seesPlayer = false;
++        if (this.aware > 0 && !this.alerted) this.aware = Math.max(0, this.aware - 0.3 * this.lastThink);
+       }
++      // Ya no hay "oído por proximidad": los pasos del jugador llegan como ruido real (emitNoise 'footstep',
++      // radio según camine en sigilo, normal o corra; ver player.js) y se tratan en hearNoise.
+       // guiados por el grito: conocen la posición del jugador un rato
+       if (this.homing > 0) {
+         this.homing -= this.lastThink;
+@@ -587,12 +606,14 @@
+         range = Math.max(range, lerp(SIGHT_DAY, inBeam ? SIGHT_BEAM : SIGHT_LIGHT, dark));
+       }
+       range *= (1 - 0.5 * (wx.fog || 0)) * (1 - 0.15 * (wx.rain || 0)) * this.s.sight;
++      range *= p.sightMul || 1;  // agachado/quieto y la habilidad Sigilo
+       if (this.state === 'dormant') range *= DORMANT_SIGHT;
+       // sin alerta: campo de visión frontal; por detrás solo lo notan pegado
+       if (!this.alerted && d > REAR_FEEL) {
+         const a2 = Math.atan2(p.y - this.y, p.x - this.x);
+         if (Math.abs(angDiff(this.angle, a2)) > FOV_HALF) return false;
+       }
++      this._sightR = range;
+       if (d > range) return false;
+       // paredes, puertas cerradas y muebles altos tapan la vista
+       return !w || !w.lineOfSight || w.lineOfSight(this.x, this.y, p.x, p.y);
+@@ -624,7 +645,7 @@
+       if (this.alerted) {
+         if (knows) return false;
+         if (st === 'search') {
+-          if (this.stateT > this.searchDur) { this.alerted = false; this.flankAngle = null; this.setState(this._calmState()); }
++          if (this.stateT > this.searchDur) { this.alerted = false; this.aware = 0.3; this.flankAngle = null; this.setState(this._calmState()); }
+           return true;
+         }
+         if (st !== 'investigate') { this.urgent = true; this.setState('investigate'); }
+@@ -648,9 +669,13 @@
+         if (!this.idle && Math.random() < 0.35) { this.idle = true; this.wanderDur = rr(1, 3.5); }
+         else {
+           this.idle = false; this.wanderDur = rr(2, 5);
+-          const bias = 0.35 + 0.35 * (g.darkness || 0); // de noche "huelen" al jugador
+-          if (d < 1400 && Math.random() < bias) this.wanderA = Math.atan2(p.y - this.y, p.x - this.x) + rr(-1.1, 1.1);
+-          else this.wanderA = Math.random() * TAU;
++          // sin "olfato": deambulan al azar, con cierta querencia hacia el último ruido fuerte (disparos,
++          // explosiones...) que hubo por la zona, no hacia el jugador
++          const L = g.director && g.director.lastLoud;
++          const age = L ? (g.director.clock - L.t) : 1e9;
++          if (L && age < 90 && Math.random() < 0.45 * (1 - age / 90) && Math.hypot(L.x - this.x, L.y - this.y) < 1500) {
++            this.wanderA = Math.atan2(L.y - this.y, L.x - this.x) + rr(-0.9, 0.9);
++          } else this.wanderA = Math.random() * TAU;
+         }
+       }
+       // sin alerta no entran al campamento
+@@ -1090,6 +1115,20 @@
+       const L = Math.sqrt(ex * ex + ey * ey);
+       if (L < 1) { this._nx = 0; this._ny = 0; return; }
+       if (allowFlow && dir && (!this.navDirect || this.forceFlowT > 0)) {
++        // El campo de flujo principal lleva HACIA EL JUGADOR: solo sirve si el objetivo está junto a él.
++        // Para otro punto (un ruido que investiga, el último sitio donde lo vio) se usa un campo local
++        // centrado en ese punto (director.pointFlow); si no lo hay, línea recta y el sistema de atascos rodea.
++        const pl = dir.game && dir.game.player;
++        const toPoint = this.state === 'investigate' || (this.state === 'chase' && !this.seesPlayer && this.unseenT >= LOSE_TRACK);
++        if (pl && toPoint) {
++          const ox = tx - pl.x, oy = ty - pl.y;
++          if (ox * ox + oy * oy > FLOW_NEAR * FLOW_NEAR) {
++            const pf = this.r < 16 && dir.pointFlow ? dir.pointFlow(this.lkX, this.lkY) : null;
++            if (pf && pf.dirAt(this.x, this.y, TMP)) { this._nx = TMP.x; this._ny = TMP.y; return; }
++            this._nx = ex / L; this._ny = ey / L;
++            return;
++          }
++        }
+         // los grandes usan el campo con obstáculos más inflados (no intentan huecos estrechos)
+         const big = this.r >= 16 && dir.flowBig && dir.flowBig.valid;
+         if (big) {
+diff --git a/js/items/crafting.js b/js/items/crafting.js
+index 12653f7..b0ac9b6 100644
+--- a/js/items/crafting.js
++++ b/js/items/crafting.js
+@@ -20,7 +20,14 @@
+     { id: 'pistol_sil', out: ['pistol_sil', 1], need: [['pistol', 1], ['botella', 1], ['cinta', 2], ['tela', 2]], tool: 'sierra', bp: 'mejoras', keep: 'pistol' },
+     { id: 'pipebomb', out: ['pipebomb', 1], need: [['chatarra', 2], ['polvora', 5], ['cinta', 1], ['clavos', 6]], tool: 'llave', bp: 'explosivos' },
+     { id: 'flare', out: ['flare', 2], need: [['polvora', 2], ['chatarra', 1], ['tela', 1]], bp: 'explosivos' },
++    // recetas que se aprenden subiendo la habilidad Supervivencia (skill: [habilidad, nivel])
++    { id: 'venda_lote', out: ['venda', 2], need: [['tela', 4]], skill: ['survival', 2], label: 'Vendas (lote)' },
++    { id: 'botiquin_campo', out: ['botiquin', 1], need: [['venda', 2], ['alcohol', 1], ['tela', 2]], skill: ['survival', 4], label: 'Botiquín de campaña' },
++    { id: 'flare_sup', out: ['flare', 1], need: [['polvora', 2], ['chatarra', 1], ['tela', 1]], skill: ['survival', 6], label: 'Bengala improvisada' },
++    { id: 'molotov_sup', out: ['molotov', 1], need: [['botella', 1], ['alcohol', 1], ['tela', 1]], skill: ['survival', 8], label: 'Molotov sin mechero' },
+   ];
++  const SKILL_NAMES = { survival: 'Supervivencia' };
++  function skillLv(id) { const g = TM.game, p = g && g.player; return p && p.skills ? p.skills.level(id) : 0; }
+ 
+   const BP_NAMES = { municion: 'Plano: munición casera', explosivos: 'Plano: explosivos', mejoras: 'Plano: mejoras de armas', refugio: 'Plano: refugio' };
+ 
+@@ -40,13 +47,14 @@
+   }
+ 
+   const Crafting = {
+-    RECIPES, BP_NAMES,
++    RECIPES, BP_NAMES, SKILL_NAMES,
+ 
+     status(inv, r) {
+-      const locked = !!(r.bp && !inv.known[r.bp]);
++      const skLocked = !!(r.skill && skillLv(r.skill[0]) < r.skill[1]);
++      const locked = !!(r.bp && !inv.known[r.bp]) || skLocked;
+       const miss = missingOf(inv, r.need);
+       const toolOk = !r.tool || inv.has(r.tool);
+-      return { locked, miss, toolOk, ok: !locked && !miss.length && toolOk };
++      return { locked, skLocked, miss, toolOk, ok: !locked && !miss.length && toolOk };
+     },
+ 
+     // Lista para la interfaz: recetas normales + reparaciones de lo que esté gastado
+@@ -68,6 +76,7 @@
+     // Fabrica. Devuelve { ok, text, stack? }.
+     craft(inv, r) {
+       const st = this.status(inv, r);
++      if (st.skLocked) return { ok: false, text: `Necesitas ${SKILL_NAMES[r.skill[0]] || r.skill[0]} ${r.skill[1]}` };
+       if (st.locked) return { ok: false, text: 'Necesitas el ' + BP_NAMES[r.bp] };
+       if (!st.toolOk) return { ok: false, text: 'Necesitas: ' + TM.Items.name(r.tool) };
+       if (st.miss.length) return { ok: false, text: 'Te falta material' };
+@@ -110,6 +119,8 @@
+         }
+       }
+       const left = inv.add(res);
++      const pl = TM.game && TM.game.player;
++      if (pl && pl.skills) pl.skills.gain('survival', 4);
+       if (wasEquipped) { const ns = inv.slots[inv.slots.length - 1]; if (ns && ns.id === res.id) inv.equip(ns); }
+       return { ok: true, text: `Fabricado: ${TM.Items.label(res)}`, stack: res, leftover: left, toolBroke: res.toolBroke };
+     },
+diff --git a/js/items/interact.js b/js/items/interact.js
+index 11e51aa..5a31144 100644
+--- a/js/items/interact.js
++++ b/js/items/interact.js
+@@ -199,6 +199,7 @@
+       const g = this.game, p = g.player, W = this.world;
+       call(W, 'markChestOpened', c.id);
+       c.opened = true;
++      if (p.skills) p.skills.gain('survival', 1.5);
+       const rng = new U.RNG(((c.id && String(c.id).split('').reduce((a, ch) => a * 31 + ch.charCodeAt(0), 7)) || 1) ^ (g.seed | 0));
+       const stacks = TM.Loot.roll(c, rng);
+       if (TM.Audio) TM.Audio.play('chest_open', c.x, c.y);
+diff --git a/js/items/inventory.js b/js/items/inventory.js
+index 2edddb4..72b42e3 100644
+--- a/js/items/inventory.js
++++ b/js/items/inventory.js
+@@ -231,10 +231,11 @@
+       this.changed();
+     }
+ 
+-    // Equipo inicial: pistola, algo de 9 mm, 1 venda, 1 agua, 1 lata
++    // Equipo inicial: pistola, cuchillo (sigilo: letal por la espalda), algo de 9 mm, 1 venda, 1 agua, 1 lata
+     giveStarter() {
+       this.slots = [];
+       this.add({ id: 'pistol', qty: 1, mag: 12 });
++      this.add({ id: 'knife', qty: 1, dur: 1 });
+       this.add({ id: 'ammo_9mm', qty: 12 });
+       this.add({ id: 'venda', qty: 1 });
+       this.add({ id: 'agua', qty: 1 });
+diff --git a/js/main.js b/js/main.js
+index 5b64a9b..4661163 100644
+--- a/js/main.js
++++ b/js/main.js
+@@ -130,6 +130,7 @@
+         if (Number.isFinite(d.needs.hunger)) p.hunger = U.clamp(d.needs.hunger, 0, 100);
+         if (Number.isFinite(d.needs.thirst)) p.thirst = U.clamp(d.needs.thirst, 0, 100);
+       }
++      if (d.skills && p.skills) { p.skills.deserialize(d.skills); p.maxStamina = p.skills.maxStamina(); }
+       // el mapa puede haber cambiado entre versiones: no aparecer dentro de una pared
+       if (this.world.findFree && !this.world.isFree(p.x, p.y, p.r + 1)) {
+         const f = this.world.findFree(p.x, p.y, p.r + 1, 600);
+@@ -155,6 +156,7 @@
+         world: this.world.serialize ? this.world.serialize() : null,
+         inventory: p.inventory && p.inventory.serialize ? p.inventory.serialize() : null,
+         needs: { hunger: p.hunger, thirst: p.thirst },
++        skills: p.skills ? p.skills.serialize() : null,   // v2+: habilidades (opcional; partidas antiguas sin él)
+       };
+     }
+ 
+diff --git a/js/ui/hud.js b/js/ui/hud.js
+index 8bbd729..48e9348 100644
+--- a/js/ui/hud.js
++++ b/js/ui/hud.js
+@@ -169,6 +169,61 @@
+       const kills = g.totalKills();
+       const km = (Math.hypot(p.x, p.y) / TM.Config.UNITS_PER_M / 1000).toFixed(2);
+       ctx.fillText(`☠ ${kills}    ⌖ ${km} km`, x, sy + 4);
++      if (p.alive) this.drawStealth(ctx, g, p, x, sy + 20, s);
++    }
++
++    // Indicador de sigilo: ojo (se llena con la sospecha de los zombies que te están viendo; rojo = te vieron)
++    // y ondas de ruido (pasos: 0 en sigilo, 1 caminando, 3 corriendo). Así se entiende por qué te detectan.
++    drawStealth(ctx, g, p, x, y, s) {
++      let aware = 0, seen = false, hunted = false;
++      for (const z of g.zombies) {
++        if (z.dead || z.remove || z.fakeDead || z.state === 'ambush') continue;
++        const pd = z._pd;
++        if (!(pd < 1200)) continue;
++        if (z.alerted) {
++          if (z.seesPlayer) seen = true; else if (pd < 700) hunted = true;
++        } else if (z.aware > aware) aware = z.aware;
++      }
++      const k = seen ? 1 : aware;
++      const noise = U.clamp(p.noiseRadius / 330, 0, 1);
++      // suavizado para que no parpadee
++      this._eye = (this._eye || 0) + (k - (this._eye || 0)) * Math.min(1, (this.lastDt || 0.016) * 8);
++      const e = this._eye;
++      const col = seen ? '#e04030' : e > 0.5 ? '#e08a30' : e > 0.02 ? '#d8c060' : '#8fb88a';
++      const ew = 10, eh = 6, cx = x + ew;
++      ctx.save();
++      ctx.globalAlpha = 0.9;
++      // fondo
++      ctx.fillStyle = 'rgba(0,0,0,0.5)';
++      rrect(ctx, x - 4, y - 10, 104, 19, 6); ctx.fill();
++      // ojo: almendra con relleno de abajo arriba según la sospecha
++      const lid = () => { ctx.beginPath(); ctx.moveTo(cx - ew, y); ctx.quadraticCurveTo(cx, y - eh * 1.7, cx + ew, y); ctx.quadraticCurveTo(cx, y + eh * 1.7, cx - ew, y); ctx.closePath(); };
++      lid(); ctx.fillStyle = 'rgba(20,20,18,0.9)'; ctx.fill();
++      if (e > 0.01) {
++        ctx.save(); lid(); ctx.clip();
++        ctx.fillStyle = col; ctx.globalAlpha = 0.85;
++        const hh = eh * 2 * e;
++        ctx.fillRect(cx - ew, y + eh - hh, ew * 2, hh);
++        ctx.restore();
++      }
++      lid(); ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
++      ctx.fillStyle = seen ? '#fff0e0' : 'rgba(230,225,210,0.85)';
++      ctx.beginPath(); ctx.arc(cx, y, seen ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill();
++      // ondas de ruido
++      const wx = cx + ew + 5;
++      const lit = noise <= 0 ? 0 : noise < 0.25 ? 1 : noise < 0.6 ? 2 : 3;
++      for (let i = 0; i < 3; i++) {
++        ctx.strokeStyle = i < lit ? (lit >= 3 ? '#e8a050' : '#e0d6c0') : 'rgba(200,190,170,0.22)';
++        ctx.lineWidth = 1.6;
++        ctx.beginPath(); ctx.arc(wx, y, 3 + i * 4, -0.75, 0.75); ctx.stroke();
++      }
++      // texto
++      const label = seen ? 'TE VEN' : hunted ? 'TE BUSCAN' : e > 0.05 ? 'SOSPECHAN' : p.sneaking ? 'SIGILO' : lit >= 3 ? 'RUIDO' : 'OCULTO';
++      ctx.font = `700 ${Math.max(9, Math.round(s * 0.19))}px ${FONT}`;
++      ctx.textAlign = 'left';
++      ctx.fillStyle = seen ? '#ff8a70' : hunted ? '#f0b070' : e > 0.05 ? '#e8d080' : 'rgba(200,215,190,0.8)';
++      ctx.fillText(label, wx + 16, y + 4);
++      ctx.restore();
+     }
+ 
+     drawClock(ctx, g, W, s) {
+@@ -397,7 +452,7 @@
+         if (g.time < 90) {
+           ctx.globalAlpha = Math.min(1, (90 - g.time) / 10);
+           ctx.font = `11px ${FONT}`; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(200,190,170,0.5)';
+-          ctx.fillText('WASD mover · MAYÚS correr · ratón apuntar · clic atacar · E usar · I mochila · Q / rueda cambiar arma · 1-3 rápidos · R recargar · ESPACIO empujar · F linterna', In.w / 2, In.h - In.s * 1.3);
++          ctx.fillText('WASD mover · MAYÚS correr · C sigilo · ratón apuntar · clic atacar · E usar · I mochila · Q / rueda cambiar arma · 1-3 rápidos · R recargar · ESPACIO empujar · F linterna', In.w / 2, In.h - In.s * 1.3);
+           ctx.globalAlpha = 1;
+         }
+         for (const id of ['pause', 'q1', 'q2', 'q3', 'bag']) this.drawButton(ctx, find(id), p, g);
+diff --git a/js/ui/inventory.js b/js/ui/inventory.js
+index 025f796..e4708b7 100644
+--- a/js/ui/inventory.js
++++ b/js/ui/inventory.js
+@@ -32,6 +32,7 @@
+         ' <div class="inv-head">' +
+         '  <button class="inv-tab on" data-tab="bag">MOCHILA</button>' +
+         '  <button class="inv-tab" data-tab="craft">FABRICAR</button>' +
++        '  <button class="inv-tab" data-tab="skills">HABILIDADES</button>' +
+         '  <div class="inv-weight"><div class="inv-wbar"><i></i></div><span class="inv-wtxt"></span></div>' +
+         '  <button class="inv-close" aria-label="Cerrar">✕</button>' +
+         ' </div>' +
+@@ -137,7 +138,7 @@
+       this.$wbar.style.background = k > 1 ? '#c8502e' : k > 0.85 ? '#c8a040' : '#7ea456';
+       this.$wtxt.textContent = `${kg(w)} / ${max} kg` + (k > 1 ? (inv.canSprint() ? ' · LENTO' : ' · NO CORRES') : '');
+       this.$wtxt.classList.toggle('over', k > 1);
+-      if (this.tab === 'bag') this.renderBag(); else this.renderCraft();
++      if (this.tab === 'bag') this.renderBag(); else if (this.tab === 'skills') this.renderSkills(); else this.renderCraft();
+       this.lastVersion = inv.version;
+     },
+ 
+@@ -223,6 +224,50 @@
+       return h;
+     },
+ 
++    // ---------- habilidades (suben con el uso, 0..10) ----------
++    renderSkills() {
++      const p = this.game.player, sk = p && p.skills;
++      this.$list.className = 'inv-list rows sk-list';
++      if (!sk) { this.$list.innerHTML = ''; this.$detail.innerHTML = ''; return; }
++      const L = TM.Skills.LIST;
++      if (!this.selSkill || !TM.Skills.def(this.selSkill)) this.selSkill = L[0].id;
++      let h = '';
++      for (const def of L) {
++        const lv = sk.level(def.id), k = sk.progress(def.id);
++        const pips = Array.from({ length: TM.Skills.MAX }, (_, i) => `<i class="${i < lv ? 'on' : ''}"></i>`).join('');
++        h += `<button class="sk-row${this.selSkill === def.id ? ' sel' : ''}${sk.flash[def.id] ? ' up' : ''}" data-sk="${def.id}" style="--skc:${def.color}">` +
++          `<span class="sk-name">${esc(def.name)}</span><span class="sk-lv">${lv}</span>` +
++          `<span class="sk-pips">${pips}</span><span class="sk-xp"><i style="width:${Math.round(k * 100)}%"></i></span></button>`;
++      }
++      this.$list.innerHTML = h;
++      this.$detail.innerHTML = this.skillHTML(this.selSkill, sk);
++    },
++
++    skillHTML(id, sk) {
++      const def = TM.Skills.def(id), lv = sk.level(id), max = TM.Skills.MAX;
++      const pc = (v) => Math.round(v * 100) + ' %';
++      const fx = {
++        aim: [`Dispersión −${pc(1 - sk.spreadMul())}`, `Recarga −${pc(1 - sk.reloadMul())}`, `Crítico +${pc(sk.critAdd())}`],
++        melee: [`Daño +${pc(sk.meleeDmgMul() - 1)}`, `Estamina por golpe −${pc(1 - sk.meleeStamMul())}`, `Golpes ${pc(1 - sk.meleeRateMul())} más rápidos`],
++        stealth: [`Ruido al correr −${pc(1 - sk.noiseMul())}`, `Te ven ${pc(1 - sk.sightMul())} más cerca`, `Golpe por la espalda +${sk.stealthBonus().toFixed(1)}×`],
++        fitness: [`Estamina máxima ${sk.maxStamina()}`, `Velocidad al correr +${pc(sk.sprintMul() - 1)}`, `Gasto al correr −${pc(1 - sk.drainMul())}`],
++        survival: [`Medicinas curan +${pc(sk.healMul() - 1)}`, `Comida y agua +${pc(sk.foodMul() - 1)}`, `Hambre y sed −${pc(1 - sk.needsMul())}`],
++      }[id] || [];
++      let h = `<div class="d-name" style="color:${def.color}">${esc(def.name)} · nivel ${lv}${lv >= max ? ' (máximo)' : ''}</div>`;
++      h += `<div class="d-desc">${esc(def.desc)}</div>`;
++      if (lv < max) {
++        const need = TM.Skills.xpNeed(lv);
++        h += `<div class="st-row"><span>Exp.</span><div class="st-bar"><i style="width:${Math.round(sk.progress(id) * 100)}%;background:${def.color}"></i></div><b>${Math.floor(sk.xp[id])}/${need}</b></div>`;
++      }
++      h += `<div class="d-stats">${fx.map(esc).join('<br>')}</div>`;
++      if (id === 'survival') {
++        const rs = TM.Crafting.RECIPES.filter((r) => r.skill && r.skill[0] === 'survival');
++        h += `<div class="d-stats">Recetas: ${rs.map((r) => `<span class="${lv >= r.skill[1] ? 'sk-ok' : 'sk-no'}">${esc(r.label)} (${r.skill[1]})</span>`).join(', ')}</div>`;
++      }
++      h += '<div class="d-hint">Las habilidades suben solas con el uso. Mientras ellos evolucionan cada día, tú también.</div>';
++      return h;
++    },
++
+     renderCraft() {
+       const inv = this.inv;
+       this.$list.className = 'inv-list rows';
+@@ -232,22 +277,22 @@
+       list.forEach((e, i) => {
+         const r = e.recipe, out = r.out;
+         const d = DB()[out[0]];
+-        const name = r.repair ? `Reparar ${d.name.toLowerCase()} (${Math.round(r.target.dur * 100)} %)` : d.name + (out[1] > 1 ? ' ×' + out[1] : '');
++        const name = r.repair ? `Reparar ${d.name.toLowerCase()} (${Math.round(r.target.dur * 100)} %)` : (r.label || d.name) + (out[1] > 1 ? ' ×' + out[1] : '');
+         const cls = e.st.ok ? 'ok' : e.st.locked ? 'locked' : 'miss';
+         const sel = this.selRecipe && (this.selRecipe === r || (r.repair && this.selRecipe.repair && this.selRecipe.target === r.target)) ? ' sel' : '';
+         h += `<button class="cr-row ${cls}${sel}" data-i="${i}"><img src="${TM.Items.iconURL(out[0])}" alt=""><span class="cr-name">${esc(name)}</span>` +
+-          `<span class="cr-st">${e.st.ok ? 'LISTO' : e.st.locked ? 'PLANO' : 'FALTA'}</span></button>`;
++          `<span class="cr-st">${e.st.ok ? 'LISTO' : e.st.skLocked ? 'NIVEL ' + r.skill[1] : e.st.locked ? 'PLANO' : 'FALTA'}</span></button>`;
+       });
+       this.$list.innerHTML = h;
+       const cur = this.selRecipe && list.find((e) => e.recipe === this.selRecipe || (e.recipe.repair && this.selRecipe.repair && e.recipe.target === this.selRecipe.target));
+       if (cur) { this.selRecipe = cur.recipe; this.$detail.innerHTML = this.recipeHTML(cur); }
+-      else { this.selRecipe = null; this.$detail.innerHTML = '<div class="d-title">Fabricar</div><div class="d-hint">Elige una receta. Las marcadas con PLANO se aprenden leyendo planos que encuentres en escuelas, ferreterías, comisarías y bases militares.</div>'; }
++      else { this.selRecipe = null; this.$detail.innerHTML = '<div class="d-title">Fabricar</div><div class="d-hint">Elige una receta. Las marcadas con PLANO se aprenden leyendo planos que encuentres en escuelas, ferreterías, comisarías y bases militares; las de NIVEL, subiendo Supervivencia.</div>'; }
+     },
+ 
+     recipeHTML(e) {
+       const r = e.recipe, inv = this.inv;
+       const d = DB()[r.out[0]];
+-      const title = r.repair ? 'Reparar: ' + d.name : d.name + (r.out[1] > 1 ? ' ×' + r.out[1] : '');
++      const title = r.repair ? 'Reparar: ' + d.name : (r.label || d.name) + (r.out[1] > 1 ? ' ×' + r.out[1] : '');
+       let h = `<div class="d-head"><img src="${TM.Items.iconURL(d.id)}" alt=""><div><div class="d-name">${esc(title)}</div>` +
+         `<div class="d-sub" style="color:${TM.Items.TIER_COLORS[d.tier]}">${TM.Items.CAT_NAMES[d.cat]}</div></div></div>`;
+       if (!r.repair) h += `<div class="d-desc">${esc(d.desc)}</div>`;
+@@ -259,6 +304,7 @@
+       }
+       if (r.tool) h += `<div class="need ${inv.has(r.tool) ? 'ok' : 'no'}"><img src="${TM.Items.iconURL(r.tool)}" alt=""><span>Herramienta: ${esc(TM.Items.name(r.tool))}</span><b>${inv.has(r.tool) ? '✓' : '✗'}</b></div>`;
+       if (r.bp && !inv.known[r.bp]) h += `<div class="need no lock"><span>Requiere el ${esc(TM.Crafting.BP_NAMES[r.bp])}</span></div>`;
++      if (e.st.skLocked) h += `<div class="need no lock"><span>Requiere ${esc(TM.Crafting.SKILL_NAMES[r.skill[0]] || r.skill[0])} nivel ${r.skill[1]}</span></div>`;
+       h += '</div>';
+       h += `<div class="d-actions"><button class="ibtn primary big" data-a="craft"${e.st.ok ? '' : ' disabled'}>${r.repair ? 'REPARAR' : 'FABRICAR'}</button></div>`;
+       return h;
+@@ -273,6 +319,11 @@
+         this.sel = this.sel === s ? null : s;
+         this.click();
+         this.renderBag();
++      } else if (this.tab === 'skills') {
++        const b = e.target.closest('.sk-row'); if (!b) return;
++        this.selSkill = b.dataset.sk;
++        this.click();
++        this.renderSkills();
+       } else {
+         const b = e.target.closest('.cr-row'); if (!b) return;
+         const ent = this._craftList[+b.dataset.i];
+diff --git a/js/world/gen/macro.js b/js/world/gen/macro.js
+index 9abc57d..91ee007 100644
+--- a/js/world/gen/macro.js
++++ b/js/world/gen/macro.js
+@@ -10,18 +10,46 @@
+   const DANGER_BONUS = { none: 0, village: 0.1, town: 0.3, city: 0.7, metro: 1.6, special: 0.6 };
+   const SPECIALS = ['military', 'prison', 'airfield', 'industrial'];
+ 
++  // Parámetros de generación del mundo (fuente de verdad; sustituyen a TM.Config.WORLD.SITE/FARM/RARE/RARE_P).
++  // Densidad pensada para que caminando 1–2 minutos siempre aparezca algo.
++  WG.PARAMS = Object.assign({
++    SITE: 320 * M,        // rejilla de asentamientos principales (320 m)
++    FARM: 112 * M,        // rejilla de granjas, cabañas y ranchos (112 m)
++    RARE: 192 * M,        // rejilla de hallazgos raros (192 m)
++    RARE_P: 0.16,         // probabilidad de hallazgo raro por celda (antes de ajustar por peligro)
++    START_VILLAGE: [190, 230], // distancia (m) del campamento al centro de la aldea inicial
++    START_CITY: [640, 720],    // distancia (m) del campamento al centro de la ciudad garantizada
++    CROSS: 96 * M,        // rejilla de pasos sobre ríos y barrancos (96 m)
++    CROSS_MAX: 46 * M,    // longitud máxima de agua/barranco que salva un paso
++  }, WG.PARAMS || {});
++
+   class Macro {
+     constructor(seed, terrain) {
+       this.seed = seed | 0;
+       this.terrain = terrain;
+-      const W = TM.Config.WORLD;
+-      this.SITE = W.SITE; this.FARM = W.FARM; this.RARE = W.RARE;
++      const P = WG.PARAMS;
++      this.SITE = P.SITE; this.FARM = P.FARM; this.RARE = P.RARE;
+       this.bases = new Map(); this.sites = new Map(); this.edges = new Map();
+       this.farms = new Map(); this.rares = new Map(); this.cand = new Map();
++      this.bigs = new Map(); this.bigOk = new Map(); this.cross = new Map();
++      // aldea inicial (celda 0,0) y ciudad garantizada a media distancia, en el lado opuesto
++      const a = this.h(0, 0, 3) * Math.PI * 2;
++      const dv = U.lerp(P.START_VILLAGE[0], P.START_VILLAGE[1], this.h(0, 0, 11)) * M;
++      this.startVillage = { a, d: dv };
++      const ac = a + Math.PI + (this.h(0, 0, 12) - 0.5) * 1.6;
++      const dc = U.lerp(P.START_CITY[0], P.START_CITY[1], this.h(0, 0, 13)) * M;
++      const cx = Math.cos(ac) * dc, cy = Math.sin(ac) * dc;
++      this.startCity = { x: cx, y: cy, i: this.cellOf(cx), j: this.cellOf(cy), d: dc };
+     }
+     h(a, b, c) { return G.hash(a, b, c, this.seed); }
+     cellOf(x) { return Math.floor((x + this.SITE / 2) / this.SITE); }
+     baseDanger(x, y) { return Math.hypot(x, y) / TM.Config.DANGER_DIST; }
++    rawPos(i, j) {
++      const S = this.SITE;
++      if (i === this.startCity.i && j === this.startCity.j) return [this.startCity.x, this.startCity.y];
++      return [i * S - S / 2 + S * (0.25 + 0.5 * this.h(i, j, 1)), j * S - S / 2 + S * (0.25 + 0.5 * this.h(i, j, 2))];
++    }
++    isStartCity(i, j) { return i === this.startCity.i && j === this.startCity.j; }
+ 
+     // ---------- sitios principales ----------
+     metroCand(i, j) {
+@@ -30,14 +58,18 @@
+       if (v !== undefined) return v;
+       const dB = this.baseDanger(i * this.SITE, j * this.SITE);
+       v = -1;
+-      if (dB > TM.Config.WORLD.METRO_MIN_DANGER && this.h(i, j, 101) < TM.Config.WORLD.METRO_P) v = this.h(i, j, 102);
++      // ~0,6 de la probabilidad por celda de la rejilla antigua de 512 m, escalada al área de la celda
++      const p = TM.Config.WORLD.METRO_P * (this.SITE / 16384) * (this.SITE / 16384) * 1.6;
++      if (dB > TM.Config.WORLD.METRO_MIN_DANGER && this.h(i, j, 101) < p) v = this.h(i, j, 102);
++      // la ciudad garantizada no compite con una gran ciudad
++      if (Math.abs(i - this.startCity.i) <= 3 && Math.abs(j - this.startCity.j) <= 3) v = -1;
+       this.cand.set(k, v);
+       return v;
+     }
+     isMetro(i, j) {
+       const c = this.metroCand(i, j);
+       if (c < 0) return false;
+-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
++      for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+         if ((dx || dy) && this.metroCand(i + dx, j + dy) > c) return false;
+       }
+       return true;
+@@ -45,51 +77,88 @@
+     // Tipo elegido por sorteo ponderado según la distancia (sin reglas de vecindad)
+     rawType(i, j) {
+       if (i === 0 && j === 0) return 'village';
+-      const S = this.SITE;
+-      const x = i * S - S / 2 + S * (0.25 + 0.5 * this.h(i, j, 1)), y = j * S - S / 2 + S * (0.25 + 0.5 * this.h(i, j, 2));
++      const [x, y] = this.rawPos(i, j);
+       const dB = this.baseDanger(x, y);
+       const ring1 = Math.abs(i) <= 1 && Math.abs(j) <= 1;
+       const w = {
+-        none: 0.22,
+-        village: U.clamp(0.42 - 0.07 * dB, 0.08, 0.42),
+-        town: U.clamp(0.18 + 0.05 * dB, 0, 0.36),
+-        city: ring1 ? 0 : (dB < 1.6 ? 0.03 : U.clamp(0.06 + 0.05 * dB, 0, 0.3)),
+-        special: ring1 ? 0 : 0.09,
++        none: 0.1,
++        village: U.clamp(0.5 - 0.06 * dB, 0.2, 0.5),
++        town: ring1 ? 0.12 : U.clamp(0.2 + 0.05 * dB, 0, 0.36),
++        city: ring1 || dB < 1.4 ? 0 : U.clamp(0.02 + 0.03 * dB, 0, 0.16),
++        special: ring1 ? 0 : 0.07,
+       };
+       let tot = 0; for (const t in w) tot += w[t];
+       let r = this.h(i, j, 4) * tot;
+       for (const t in w) { r -= w[t]; if (r <= 0) return t; }
+       return 'none';
+     }
++    // Candidata a gran asentamiento (ciudad o gran ciudad): { type, pri, x, y, R } o null (sin vecindad)
++    bigCand(i, j) {
++      const k = i + ',' + j;
++      if (this.bigs.has(k)) return this.bigs.get(k);
++      let c = null;
++      const [x, y] = this.rawPos(i, j);
++      const hR = this.h(i, j, 6);
++      if (this.isStartCity(i, j)) c = { type: 'city', pri: 3, x, y, R: (240 + 60 * hR) * M };
++      else if (!(Math.abs(i) <= 1 && Math.abs(j) <= 1)) {
++        if (this.isMetro(i, j)) c = { type: 'metro', pri: 2 + this.metroCand(i, j), x, y, R: (430 + 170 * hR) * M };
++        else if (this.rawType(i, j) === 'city') c = { type: 'city', pri: this.h(i, j, 4), x, y, R: (220 + 120 * hR) * M };
++      }
++      this.bigs.set(k, c);
++      return c;
++    }
++    // ¿Sobrevive la candidata? Pierde ante otra mayor (más prioridad) que la solape
++    bigType(i, j) {
++      const k = i + ',' + j;
++      if (this.bigOk.has(k)) return this.bigOk.get(k);
++      const c = this.bigCand(i, j);
++      let ok = c;
++      if (c && c.pri < 3) {
++        for (let dy = -3; dy <= 3 && ok; dy++) for (let dx = -3; dx <= 3 && ok; dx++) {
++          if (!dx && !dy) continue;
++          const o = this.bigCand(i + dx, j + dy);
++          if (o && o.pri > c.pri && Math.hypot(o.x - c.x, o.y - c.y) < (o.R + c.R) * 0.95) ok = null;
++        }
++      }
++      this.bigOk.set(k, ok);
++      return ok;
++    }
++    // Celda cubierta por una ciudad vecina (su centro cae dentro de la ciudad): queda vacía
++    dominated(i, j) {
++      const [x, y] = this.rawPos(i, j);
++      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
++        if (!dx && !dy) continue;
++        const o = this.bigType(i + dx, j + dy);
++        if (o && Math.hypot(o.x - x, o.y - y) < o.R + 50 * M) return true;
++      }
++      return false;
++    }
+     siteBase(i, j) {
+       const k = i + ',' + j;
+       let s = this.bases.get(k);
+       if (s) return s;
+-      const S = this.SITE;
+-      const ox = i * S - S / 2, oy = j * S - S / 2;
+-      let x = ox + S * (0.25 + 0.5 * this.h(i, j, 1)), y = oy + S * (0.25 + 0.5 * this.h(i, j, 2));
+-      let type = 'none', sub = null;
++      let [x, y] = this.rawPos(i, j);
++      let type = 'none', sub = null, small = false;
+       const dB = this.baseDanger(x, y);
++      const big = this.bigType(i, j);
+       if (i === 0 && j === 0) {
+-        // aldea cercana al campamento inicial
+-        const a = this.h(0, 0, 3) * Math.PI * 2;
+-        x = Math.cos(a) * 5600; y = Math.sin(a) * 5600;
+-        type = 'village';
+-      } else if (this.isMetro(i, j)) {
+-        type = 'metro';
+-      } else {
+-        let nearMetro = false;
+-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if ((dx || dy) && this.isMetro(i + dx, j + dy)) nearMetro = true;
+-        if (!nearMetro) {
+-          type = this.rawType(i, j);
+-          // dos ciudades no pueden ser vecinas: la de menor prioridad queda en pueblo
+-          if (type === 'city') {
+-            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+-              if ((dx || dy) && this.rawType(i + dx, j + dy) === 'city' && this.h(i + dx, j + dy, 4) > this.h(i, j, 4)) type = 'town';
+-            }
+-          }
+-          if (type === 'special') sub = SPECIALS[Math.floor(this.h(i, j, 5) * SPECIALS.length)];
++        // aldea a la vista del campamento inicial
++        const sv = this.startVillage;
++        x = Math.cos(sv.a) * sv.d; y = Math.sin(sv.a) * sv.d;
++        // si cae en el agua se gira alrededor del campamento (a la misma distancia)
++        for (let t = 1; t < 16 && this.terrain.blocked(x, y); t++) {
++          const a = sv.a + (t % 2 ? 1 : -1) * Math.ceil(t / 2) * 0.39;
++          x = Math.cos(a) * sv.d; y = Math.sin(a) * sv.d;
+         }
++        type = 'village';
++      } else if (big) {
++        type = big.type;
++      } else if (!this.dominated(i, j)) {
++        type = this.rawType(i, j);
++        if (type === 'city') type = 'town';
++        if (type === 'special') sub = SPECIALS[Math.floor(this.h(i, j, 5) * SPECIALS.length)];
++        // caseríos: aldeas pequeñas de pocas casas
++        if (type === 'village' && this.h(i, j, 14) < 0.35) small = true;
+       }
+       // los asentamientos evitan el agua: se desplaza el centro si cae en el agua
+       if (type !== 'none' && this.terrain.blocked(x, y)) {
+@@ -97,23 +166,24 @@
+         for (let d = 1600; d <= 6400 && !moved; d += 1600) {
+           for (let a = 0; a < 8; a++) {
+             const px = x + Math.cos(a * 0.785) * d, py = y + Math.sin(a * 0.785) * d;
+-            if (!this.terrain.blocked(px, py)) { x = px; y = py; moved = true; break; }
++            if (!this.terrain.blocked(px, py) && Math.hypot(px, py) > TM.Config.SAFE_RADIUS + 60 * M) { x = px; y = py; moved = true; break; }
+           }
+         }
+       }
+-      s = { i, j, key: 's' + i + '_' + j, type, sub, x, y, rank: RANK[type], dB };
++      s = { i, j, key: 's' + i + '_' + j, type, sub, x, y, rank: RANK[type], dB, small };
+       this.bases.set(k, s);
+       return s;
+     }
+     // Radio deseado (antes de repartir el espacio con los vecinos)
+     desiredR(i, j) {
+       const s = this.siteBase(i, j);
+-      const r = (a, b) => (a + (b - a) * this.h(i, j, 6)) * M;
++      const hR = this.h(i, j, 6);
++      const r = (a, b) => (a + (b - a) * hR) * M;
++      if (i === 0 && j === 0) return Math.max(70 * M, Math.hypot(s.x, s.y) - 72 * M);
+       switch (s.type) {
+-        case 'village': return r(70, 150);
+-        case 'town': return r(120, 200);
+-        case 'city': return r(220, 340);
+-        case 'metro': return r(430, 600);
++        case 'village': return s.small ? r(38, 62) : r(75, 140);
++        case 'town': return r(120, 190);
++        case 'city': case 'metro': return this.bigType(i, j).R;
+         case 'special': return r(70, 110);
+       }
+       return 0;
+@@ -136,10 +206,13 @@
+           R = Math.min(R, d * 0.9 * Rd / (Rd + rn));
+         }
+       }
++      // las ciudades no se encogen por debajo del 70 % de su tamaño (sus vecinos ya se apartaron)
++      if (s.rank >= 3) R = Math.max(R, Rd * 0.7);
+       s.R = R;
+       // forma: alargada a lo largo de la carretera, en un cruce, radial
+-      s.shape = s.type === 'village' ? (this.h(i, j, 7) < 0.55 ? 'long' : this.h(i, j, 7) < 0.8 ? 'cross' : 'radial') : 'radial';
+-      if (i === 0 && j === 0) R = Math.min(R, Math.hypot(s.x, s.y) - 1700);
++      s.shape = s.type === 'village' ? (s.small || this.h(i, j, 7) < 0.55 ? 'long' : this.h(i, j, 7) < 0.8 ? 'cross' : 'radial') : 'radial';
++      // la aldea inicial empieza a ~70 m del campamento
++      if (i === 0 && j === 0) R = Math.max(40 * M, Math.min(R, Math.hypot(s.x, s.y) - 70 * M));
+       s.R = R;
+       s.danger = s.dB + DANGER_BONUS[s.type];
+       s.seed = Math.floor(this.h(i, j, 8) * 1e9);
+@@ -161,7 +234,7 @@
+     }
+     settlementAt(x, y) {
+       let best = null, bv = 1;
+-      const list = this.sitesAround(x, y, 2, this._sa || (this._sa = []));
++      const list = this.sitesAround(x, y, 3, this._sa || (this._sa = []));
+       for (const s of list) {
+         if (s.type === 'none') continue;
+         const v = Math.hypot(x - s.x, y - s.y) / (s.R * 1.05);
+@@ -172,7 +245,7 @@
+     }
+     dangerBonus(x, y) {
+       let b = 0;
+-      const list = this.sitesAround(x, y, 2, this._sb || (this._sb = []));
++      const list = this.sitesAround(x, y, 3, this._sb || (this._sb = []));
+       for (const s of list) {
+         if (s.type === 'none') continue;
+         const d = Math.hypot(x - s.x, y - s.y);
+@@ -321,37 +394,59 @@
+       return best;
+     }
+ 
+-    // ---------- granjas (rejilla de 128 m) ----------
+-    farm(i, j) {
++    // ---------- granjas, cabañas, ranchos y chabolas (rejilla de 112 m) ----------
++    // Candidata sin reglas de vecindad: { x, y, type, small, R, pri, forced } o null
++    farmCand(i, j) {
+       const k = i + ',' + j;
+-      if (this.farms.has(k)) return this.farms.get(k);
++      const cc = this._fc || (this._fc = new Map());
++      if (cc.has(k)) return cc.get(k);
+       const F = this.FARM;
+       let f = null;
+       const x = i * F + F * (0.3 + 0.4 * this.h(i, j, 41)), y = j * F + F * (0.3 + 0.4 * this.h(i, j, 42));
+       // granja garantizada cerca del campamento, en el lado opuesto a la aldea
+-      const v = this.siteBase(0, 0);
+-      const fi = v.x > 0 ? -1 : 0, fj = v.y > 0 ? -1 : 0;
+-      const forced = i === fi && j === fj;
++      const sv = this.startVillage;
++      const fx = -Math.cos(sv.a) * 95 * M, fy = -Math.sin(sv.a) * 95 * M;
++      const forced = i === Math.floor(fx / F) && j === Math.floor(fy / F);
+       const w = this.terrain.weights(x, y, {});
+-      const p = forced ? 1 : 0.3 * w.farmland + 0.14 * w.plains + 0.06 * w.forest + 0.05 * w.desert + 0.04 * w.swamp;
+-      let ok = this.h(i, j, 43) < p && Math.hypot(x, y) > TM.Config.SAFE_RADIUS + 1100 && !this.terrain.blocked(x, y);
+-      if (ok && !forced) {
+-        const list = this.sitesAround(x, y, 2, []);
+-        for (const s of list) if (s.type !== 'none' && Math.hypot(x - s.x, y - s.y) < s.R * 1.12 + 50 * M) ok = false;
+-      }
+-      if (ok) {
++      const p = forced ? 1 : Math.min(0.62, 0.55 * w.farmland + 0.34 * w.plains + 0.36 * w.forest + 0.22 * w.desert + 0.3 * w.swamp);
++      if (this.h(i, j, 43) < p && Math.hypot(x, y) > TM.Config.SAFE_RADIUS + 1400 && !this.terrain.blocked(x, y)) {
+         let type = 'farm';
+-        if (w.forest > 0.55) type = this.h(i, j, 44) < 0.7 ? 'cabin' : 'farm';
++        const ht = this.h(i, j, 44);
++        if (w.forest > 0.55) type = ht < 0.75 ? 'cabin' : 'farm';
+         else if (w.desert > 0.55) type = 'ranch';
+         else if (w.swamp > 0.5) type = 'shack';
+-        f = { kind: 'farm', type, i, j, x, y, key: 'f' + i + '_' + j, seed: Math.floor(this.h(i, j, 45) * 1e9), dB: this.baseDanger(x, y) };
+-        f.R = (type === 'farm' ? 46 : type === 'ranch' ? 40 : 22) * M;
++        else if (w.plains > 0.5 && ht < 0.15) type = 'cabin';
++        const small = type === 'farm' && (this.h(i, j, 46) < 0.4 || w.forest > 0.4);
++        const R = (type === 'farm' ? (small ? 26 : 46) : type === 'ranch' ? 40 : 22) * M;
++        f = { x, y, type, small, R, pri: forced ? 2 : this.h(i, j, 47), forced };
++      }
++      cc.set(k, f);
++      return f;
++    }
++    farm(i, j) {
++      const k = i + ',' + j;
++      if (this.farms.has(k)) return this.farms.get(k);
++      const c = this.farmCand(i, j);
++      let f = null;
++      let ok = !!c;
++      // dos granjas vecinas no se pisan: queda la de más prioridad
++      for (let dj = -1; dj <= 1 && ok; dj++) for (let di = -1; di <= 1 && ok; di++) {
++        if (!di && !dj) continue;
++        const o = this.farmCand(i + di, j + dj);
++        if (o && o.pri > c.pri && Math.hypot(o.x - c.x, o.y - c.y) < (o.R + c.R) * 1.7 + 16 * M) ok = false;
++      }
++      if (ok && !c.forced) {
++        const list = this.sitesAround(c.x, c.y, 3, []);
++        for (const s of list) if (s.type !== 'none' && Math.hypot(c.x - s.x, c.y - s.y) < s.R * 1.1 + c.R + 24 * M) ok = false;
++      }
++      if (ok) {
++        f = { kind: 'farm', type: c.type, small: c.small, i, j, x: c.x, y: c.y, key: 'f' + i + '_' + j, seed: Math.floor(this.h(i, j, 45) * 1e9), dB: this.baseDanger(c.x, c.y), R: c.R };
+       }
+       this.farms.set(k, f);
+       return f;
+     }
+ 
+-    // ---------- hallazgos raros (rejilla de 256 m) ----------
++    // ---------- hallazgos raros (rejilla de 192 m) ----------
+     rare(i, j) {
+       const k = i + ',' + j;
+       if (this.rares.has(k)) return this.rares.get(k);
+@@ -359,10 +454,10 @@
+       let r = null;
+       const x = i * RR + RR * (0.2 + 0.6 * this.h(i, j, 61)), y = j * RR + RR * (0.2 + 0.6 * this.h(i, j, 62));
+       const dB = this.baseDanger(x, y);
+-      const p = TM.Config.WORLD.RARE_P * U.clamp(0.4 + dB * 0.3, 0, 1.6);
++      const p = WG.PARAMS.RARE_P * U.clamp(0.5 + dB * 0.3, 0, 1.6);
+       if (this.h(i, j, 63) < p && Math.hypot(x, y) > 2600 && !this.terrain.blocked(x, y)) {
+         let ok = true;
+-        const list = this.sitesAround(x, y, 2, []);
++        const list = this.sitesAround(x, y, 3, []);
+         for (const s of list) if (s.type !== 'none' && Math.hypot(x - s.x, y - s.y) < s.R * 1.05 + 30 * M) ok = false;
+         // no encima de granjas
+         const F = this.FARM;
+@@ -390,10 +485,93 @@
+       return r;
+     }
+ 
++    // ¿Hay sitio libre (lejos de asentamientos, granjas, hallazgos y del campamento) en (x, y) con radio rad?
++    placeFree(x, y, rad) {
++      const list = this.sitesAround(x, y, 3, this._pfl || (this._pfl = []));
++      let ok = true;
++      for (const s of list) if (s.type !== 'none' && Math.hypot(x - s.x, y - s.y) < s.R * 1.1 + rad + 6 * M) { ok = false; break; }
++      list.length = 0;
++      if (!ok) { WG._dbg && WG._dbg.site++; return false; }
++      const F = this.FARM;
++      for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
++        const f = this.farm(Math.floor(x / F) + di, Math.floor(y / F) + dj);
++        if (f && Math.hypot(f.x - x, f.y - y) < f.R * (f.type === 'farm' && !f.small ? 2.2 : 1.7) + rad) { WG._dbg && WG._dbg.farm++; return false; }
++      }
++      const RR = this.RARE;
++      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
++        const q = this.rare(Math.floor(x / RR) + di, Math.floor(y / RR) + dj);
++        if (q && Math.hypot(q.x - x, q.y - y) < q.R * 1.5 + rad) { WG._dbg && WG._dbg.rare++; return false; }
++      }
++      return Math.hypot(x, y) > TM.Config.SAFE_RADIUS + rad + 30 * M;
++    }
++
++    // ---------- pasos sobre ríos y barrancos (rejilla de 96 m) ----------
++    // En cada celda se recorren una línea vertical y otra horizontal; cada tramo de agua o barranco
++    // corto (≤ CROSS_MAX) que la corta recibe una pasarela/vado de 3,5 m (carretera 'dirt' con ford: true).
++    // Así ningún río o barranco deja zonas sin acceso aunque no haya carretera.
++    crossCell(i, j) {
++      const k = i + ',' + j;
++      let out = this.cross.get(k);
++      if (out) return out;
++      out = [];
++      const C = WG.PARAMS.CROSS, MAXL = WG.PARAMS.CROSS_MAX, T = this.terrain;
++      const st = 4 * M;
++      const wet = (x, y) => T.kindAt(x, y) !== 0;
++      for (let axis = 0; axis < 2; axis++) {
++        // axis 0: línea vertical (x fija), axis 1: horizontal (y fija)
++        const fix = axis === 0 ? i * C + C * (0.2 + 0.6 * this.h(i, j, 81)) : j * C + C * (0.2 + 0.6 * this.h(i, j, 82));
++        const a0 = (axis === 0 ? j : i) * C, a1 = a0 + C;
++        const P = (a) => (axis === 0 ? [fix, a] : [a, fix]);
++        let runStart = null, prevWet = wet(...P(a0 - MAXL - st));
++        for (let a = a0 - MAXL; a <= a1 + MAXL; a += st) {
++          const w = wet(...P(a));
++          if (w && !prevWet) runStart = a;
++          else if (!w && prevWet && runStart !== null) {
++            const mid = (runStart + a) / 2;
++            if (mid >= a0 && mid < a1 && a - runStart <= MAXL + st) {
++              // afinar las orillas a 1 m
++              let lo = runStart - st, hi = runStart;
++              for (let it = 0; it < 3; it++) { const m = (lo + hi) / 2; if (wet(...P(m))) hi = m; else lo = m; }
++              const s0 = lo;
++              lo = a - st; hi = a;
++              for (let it = 0; it < 3; it++) { const m = (lo + hi) / 2; if (wet(...P(m))) lo = m; else hi = m; }
++              const s1 = hi;
++              const e0 = s0 - 3 * M, e1 = s1 + 3 * M;
++              const pts = [];
++              const n = Math.max(2, Math.ceil((e1 - e0) / (8 * M)));
++              for (let q = 0; q <= n; q++) pts.push(...P(e0 + (e1 - e0) * q / n));
++              const r = G.makeRoad(pts, 112, 'dirt', { local: true, ford: true });
++              r.ford = true; r.key = 'x' + i + '_' + j + '_' + axis + '_' + Math.round(s0);
++              out.push(r);
++            }
++            runStart = null;
++          } else if (!w) runStart = null;
++          prevWet = w;
++        }
++      }
++      this.cross.set(k, out);
++      return out;
++    }
++    // Pasos cuyo trazado toca el rectángulo
++    crossingsIn(x0, y0, x1, y1, out) {
++      out = out || [];
++      const C = WG.PARAMS.CROSS, pad = WG.PARAMS.CROSS_MAX + 8 * M;
++      for (let j = Math.floor((y0 - pad) / C); j <= Math.floor((y1 + pad) / C); j++) {
++        for (let i = Math.floor((x0 - pad) / C); i <= Math.floor((x1 + pad) / C); i++) {
++          for (const r of this.crossCell(i, j)) {
++            const b = r.bbox;
++            if (b.x1 < x0 || b.x0 > x1 || b.y1 < y0 || b.y0 > y1) continue;
++            out.push(r);
++          }
++        }
++      }
++      return out;
++    }
++
+     // Lista de planes (asentamientos, granjas, raros, aristas) que pueden tocar un rectángulo
+     plansInRect(x0, y0, x1, y1, out) {
+       out = out || [];
+-      const ring = 2;
++      const ring = 3;
+       const c0 = this.cellOf(x0), c1 = this.cellOf(x1), r0 = this.cellOf(y0), r1 = this.cellOf(y1);
+       for (let j = r0 - ring; j <= r1 + ring; j++) for (let i = c0 - ring; i <= c1 + ring; i++) {
+         const s = this.site(i, j);
+diff --git a/js/world/gen/places.js b/js/world/gen/places.js
+index 8f4ebab..12f9417 100644
+--- a/js/world/gen/places.js
++++ b/js/world/gen/places.js
+@@ -93,8 +93,9 @@
+         WG.Settle.storyBuilding(P, b);
+         P.area('lawn', hr.x - 4 * M, hr.y - 4 * M, hr.w + 8 * M, hr.h + 8 * M);
+       }
+-      // granero
++      // granero (las granjas pequeñas solo tienen casa, cobertizo y huerto)
+       const ba = a + Math.PI + rng.range(-0.9, 0.9);
++      if (!f.small) {
+       const bw = R_(rng, 12, 17), bh = R_(rng, 16, 24);
+       const br = rc(f.x + Math.cos(ba) * 22 * M, f.y + Math.sin(ba) * 22 * M, bw, bh);
+       if (P.okRect(br, M, 8)) {
+@@ -106,6 +107,7 @@
+         const sx = br.x + br.w + sr + M, sy = br.y + sr + M;
+         if (P.rectFree({ x: sx - sr, y: sy - sr, w: sr * 2, h: sr * 2 }, 0)) P.circleProp('silo', sx, sy, sr, {}, true);
+       }
++      }
+       // cobertizos, tractor, pacas, corral
+       for (let i = 0; i < rng.int(0, 2); i++) {
+         const a2 = rng.range(0, 6.28), d = R_(rng, 14, 24);
+@@ -121,7 +123,7 @@
+         const x = f.x + rng.range(-20, 20) * M, y = f.y + rng.range(-20, 20) * M;
+         if (P.rectFree({ x: x - 24, y: y - 24, w: 48, h: 48 }, 0)) P.circleProp('haybale', x, y, 22, {}, false);
+       }
+-      if (rng.chance(0.5)) {
++      if (!f.small && rng.chance(0.5)) {
+         const a2 = rng.range(0, 6.28);
+         const cr = rc(f.x + Math.cos(a2) * 30 * M, f.y + Math.sin(a2) * 30 * M, R_(rng, 14, 22), R_(rng, 14, 22));
+         if (P.okRect(cr, 0, 4)) { P.reserve(cr); P.area('dirtroad', cr.x, cr.y, cr.w, cr.h); fenceRect(P, cr, 'wood', [{ side: 'n', g: [cr.x + cr.w * 0.4, cr.x + cr.w * 0.6] }]); P.decal('bones', cr.x + cr.w / 2, cr.y + cr.h / 2, 1.5, 0); P.prop('trough', cr.x + cr.w / 2, cr.y + 30, {}, [{ shape: 'rect', kind: 'trough', x: cr.x + cr.w / 2 - 30, y: cr.y + 22, w: 60, h: 18, blocksSight: false }]); }
+@@ -129,9 +131,10 @@
+       if (rng.chance(0.5)) P.circleProp('well', f.x + rng.range(-8, 8) * M, f.y + rng.range(-8, 8) * M, 22, {}, false);
+       // campos
+       yield;
+-      for (let i = 0; i < rng.int(2, 5); i++) {
+-        const a2 = rng.range(0, 6.28), d = R_(rng, 38, 60);
+-        field(P, f.x + Math.cos(a2) * d - R_(rng, 15, 30), f.y + Math.sin(a2) * d - R_(rng, 15, 30), R_(rng, 30, 70), R_(rng, 30, 70));
++      for (let i = 0, nf = f.small ? rng.int(0, 1) : rng.int(2, 5); i < nf; i++) {
++        const a2 = rng.range(0, 6.28), d = f.small ? R_(rng, 20, 26) : R_(rng, 38, 60);
++        const fs = f.small ? [14, 24] : [30, 70];
++        field(P, f.x + Math.cos(a2) * d - R_(rng, fs[0] / 2, fs[1] / 2), f.y + Math.sin(a2) * d - R_(rng, fs[0] / 2, fs[1] / 2), R_(rng, fs[0], fs[1]), R_(rng, fs[0], fs[1]));
+       }
+       P.chest(f.x + rng.range(-6, 6) * M, f.y + rng.range(-6, 6) * M, 'caja', 'farmhouse');
+     } else if (t === 'cabin' || t === 'shack') {
+@@ -439,6 +442,41 @@
+     return P;
+   }
+ 
++  // Desvío junto a un puente caído: camino de tierra que sale de la carretera antes de la orilla, cruza el agua
++  // por una pasarela/vado (ford) a 14–30 m del puente y vuelve a la carretera. Devuelve false si no hay paso corto.
++  function detour(P, world, r, q) {
++    const T = world.terrain;
++    const sa = Math.max(0, q.s0 - 12 * M), sb = Math.min(r.len, q.s1 + 12 * M);
++    const a = G.roadAt(r, sa), b = G.roadAt(r, sb);
++    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
++    const wetLen0 = q.s1 - q.s0;
++    for (const off of [16, 22, 30]) {
++      for (const side of [1, -1]) {
++        const nx = (-dy / L) * side * off * M, ny = (dx / L) * side * off * M;
++        const pts = G.catmull([a.x, a.y, a.x + dx * 0.15 + nx, a.y + dy * 0.15 + ny, b.x - dx * 0.15 + nx, b.y - dy * 0.15 + ny, b.x, b.y], 5);
++        // longitud mojada del desvío (el tramo que hace de pasarela)
++        let wet = 0, runs = 0, prevW = false;
++        for (let i = 0; i < pts.length - 2; i += 2) {
++          const sl = Math.hypot(pts[i + 2] - pts[i], pts[i + 3] - pts[i + 1]);
++          const n = Math.max(1, Math.ceil(sl / (2 * M)));
++          for (let k = 0; k < n; k++) {
++            const t = k / n, x = pts[i] + (pts[i + 2] - pts[i]) * t, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * t;
++            const w = T.kindAt(x, y) !== 0;
++            if (w) wet += sl / n;
++            if (w && !prevW) runs++;
++            prevW = w;
++          }
++        }
++        if (runs > 1 || wet > Math.min(wetLen0 + 14 * M, WG.PARAMS.CROSS_MAX)) continue;
++        const rd = G.makeRoad(pts, 112, 'dirt', { local: true, ford: true, detour: true });
++        P.addRoad(rd);
++        P.decal('text', a.x + nx * 0.5, a.y + ny * 0.5, 1, 0, { text: 'DESVÍO', color: 'rgba(220,200,90,0.7)', size: 13 });
++        return true;
++      }
++    }
++    return false;
++  }
++
+   // ---------- tramos de carretera ----------
+   function* planEdge(world, e) {
+     const P = new WG.Plan(world, e.key, 'edge', e.seed);
+@@ -447,24 +485,54 @@
+     yield* P.dryScan();
+     P.danger = (e.A.dB + e.B.dB) / 2;
+     const full = e.full;
+-    // lejos de asentamientos, granjas y hallazgos
++    // lejos de asentamientos, granjas, hallazgos y de los cruces con otra carretera de menor clave
++    // (cada cruce lo "reclama" una sola arista: dos planes independientes no construyen encima uno del otro)
++    const near = [];
+     const free = (x, y, rad) => {
+-      for (const S of [e.A, e.B]) if (S.type !== 'none' && Math.hypot(x - S.x, y - S.y) < S.R * 1.1 + rad + 20 * M) return false;
+-      const F = world.macro.FARM;
+-      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+-        const f = world.macro.farm(Math.floor(x / F) + di, Math.floor(y / F) + dj);
+-        if (f && Math.hypot(f.x - x, f.y - y) < f.R * 2 + rad) return false;
++      if (!world.macro.placeFree(x, y, rad)) return false;
++      near.length = 0;
++      world.macro.roadsInRect(x - rad - 40 * M, y - rad - 40 * M, x + rad + 40 * M, y + rad + 40 * M, near);
++      for (const r of near) {
++        if (!r.edge || r.edge === e || r.edge.key > e.key) continue;
++        if (G.roadDist(r, x, y) < rad + 40 * M) return false;
+       }
+-      const RR = world.macro.RARE;
+-      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+-        const q = world.macro.rare(Math.floor(x / RR) + di, Math.floor(y / RR) + dj);
+-        if (q && Math.hypot(q.x - x, q.y - y) < q.R * 1.5 + rad) return false;
+-      }
+-      return Math.hypot(x, y) > TM.Config.SAFE_RADIUS + rad + 30 * M;
++      return true;
+     };
++    yield* WG.warmEdges(world, full.bbox.x0, full.bbox.y0, full.bbox.x1, full.bbox.y1);
++    // otras carreteras globales cercanas (para que los lotes no las pisen)
++    for (const r of world.macro.roadsInRect(full.bbox.x0 - 40 * M, full.bbox.y0 - 40 * M, full.bbox.x1 + 40 * M, full.bbox.y1 + 40 * M, [])) if (r.edge !== e) P.addRoad(r, false);
++    // puente caído: la carretera se corta en el agua; restos y aviso en las orillas. Solo si hay un desvío
++    // (pasarela o vado improvisado) a menos de ~40 m; si no, el puente sigue en pie.
++    for (const r of e.roads) {
++      if (!r.collapsed) continue;
++      const runs = [];
++      let prev = 0, start = 0, lastLand = null, startLand = null;
++      for (let sAl = 0; sAl < r.len; sAl += 2 * M) {
++        const p = G.roadAt(r, sAl);
++        const k = world.terrain.kindAt(p.x, p.y);
++        const wet = k === 1 || k === 2 || k === 3 ? 1 : 0;
++        if (wet && !prev) { start = sAl; startLand = lastLand; }
++        if (!wet && prev && startLand) runs.push({ s0: start, s1: sAl, a: startLand, b: p });
++        if (!wet) lastLand = p;
++        prev = wet;
++      }
++      let ok = runs.length > 0;
++      for (const q of runs) if (ok && !detour(P, world, r, q)) ok = false;
++      if (!ok) { r.collapsed = false; continue; }
++      for (const q of runs) {
++        for (const [land, back] of [[q.a, -1], [q.b, 1]]) {
++          for (let i = 0; i < 4; i++) P.decal('rubble', land.x + rng.range(-1, 1) * r.w * 0.5, land.y + rng.range(-1, 1) * r.w * 0.5, rng.range(1.2, 2.2), 0);
++          const bx = land.x + land.dx * back * 6 * M, by = land.y + land.dy * back * 6 * M;
++          const nx = -land.dy, ny = land.dx;
++          P.prop('barrier', bx, by, { w: r.w * 0.8, h: 12, ang: Math.atan2(ny, nx), rotated: true }, []);
++          P.decal('text', bx + land.dx * back * 2 * M, by + land.dy * back * 2 * M, 1, Math.atan2(land.dy, land.dx) + Math.PI / 2, { text: 'PUENTE CAÍDO', color: 'rgba(220,200,90,0.75)', size: 15 });
++        }
++      }
++      yield;
++    }
+     yield;
+     // gasolinera de carretera
+-    if (e.kind !== 'dirt' && rng.chance(0.32)) {
++    if (e.kind !== 'dirt' && rng.chance(0.45)) {
+       for (let t = 0; t < 6; t++) {
+         const sAl = full.len * rng.range(0.3, 0.7);
+         const p = G.roadAt(full, sAl);
+@@ -491,6 +559,33 @@
+       }
+       yield;
+     }
++    // caseríos y edificios sueltos a lo largo de la carretera (casas de campo, talleres, tiendas, bares, capillas)
++    const RS = WG.Settle;
++    const KINDS = ['house_v', 'house_v', 'house_v', 'house_s', 'farmlot', 'farmlot', 'garage', 'store', 'bar', 'chapel', 'junk', 'empty'];
++    for (let sAl = R_(rng, 30, 90); sAl < full.len - 20 * M; sAl += R_(rng, 65, 140)) {
++      if (WG.over()) yield;
++      if (!rng.chance(e.kind === 'dirt' ? 0.45 : 0.6)) continue;
++      const p0 = G.roadAt(full, sAl);
++      const DB = WG._dbg || (WG._dbg = { c: 0, nf: 0, pf: 0, lots: 0, nolot: 0, site: 0, farm: 0, rare: 0 }); DB.c++;
++      if (!world.macro.placeFree(p0.x, p0.y, 30 * M)) DB.pf++;
++      if (!free(p0.x, p0.y, 30 * M)) { DB.nf++; continue; }
++      const n = rng.chance(0.35) ? 1 : rng.int(2, 5);
++      let side = rng.chance(0.5) ? 1 : -1;
++      let sA = sAl;
++      for (let k = 0; k < n && sA < full.len - 10 * M; k++) {
++        const kind = rng.pick(KINDS);
++        const filter = (x, y) => free(x, y, 14 * M);
++        const lot = RS.tryLotAt(P, null, full, sA, side, kind, filter);
++        if (lot) { WG._dbg.lots++;
++          RS.build(P, kind, lot);
++          sA += lot.proj + R_(rng, 2, 12);
++        } else { sA += 8 * M; WG._dbg.nolot++; }
++        if (rng.chance(0.45)) side = -side;
++        if (WG.over()) yield;
++      }
++      if (n >= 2) P.hint(p0.x, p0.y);
++    }
++    yield;
+     // autos sueltos en el arcén y basura
+     for (let sAl = R_(rng, 20, 80); sAl < full.len; sAl += R_(rng, 60, 160)) {
+       if (WG.over()) yield;
+@@ -531,30 +626,6 @@
+         P.hint(p0.x, p0.y);
+       }
+     }
+-    // puente caído: la carretera se corta en el agua; restos y aviso en las orillas
+-    for (const r of e.roads) {
+-      if (!r.collapsed) continue;
+-      let prev = 0, lastLand = null;
+-      for (let sAl = 0; sAl < r.len; sAl += 3 * M) {
+-        const p = G.roadAt(r, sAl);
+-        const k = world.terrain.kindAt(p.x, p.y);
+-        const wet = k === 1 || k === 2 || k === 3 ? 1 : 0;
+-        if (wet !== prev && sAl > 0) {
+-          const land = wet ? lastLand : p; // punto en tierra junto a la orilla
+-          if (land) {
+-            for (let i = 0; i < 4; i++) P.decal('rubble', land.x + rng.range(-1, 1) * r.w * 0.5, land.y + rng.range(-1, 1) * r.w * 0.5, rng.range(1.2, 2.2), 0);
+-            const back = wet ? -1 : 1;
+-            const bx = land.x + land.dx * back * 6 * M, by = land.y + land.dy * back * 6 * M;
+-            const nx = -land.dy, ny = land.dx;
+-            P.prop('barrier', bx, by, { w: r.w * 0.8, h: 12, ang: Math.atan2(ny, nx), rotated: true }, []);
+-            P.decal('text', bx + land.dx * back * 2 * M, by + land.dy * back * 2 * M, 1, Math.atan2(land.dy, land.dx) + Math.PI / 2, { text: 'PUENTE CAÍDO', color: 'rgba(220,200,90,0.75)', size: 15 });
+-          }
+-        }
+-        if (!wet) lastLand = p;
+-        prev = wet;
+-      }
+-      yield;
+-    }
+     // control de carretera
+     if (rng.chance(0.07)) {
+       const sAl = full.len * rng.range(0.3, 0.7);
+diff --git a/js/world/gen/plan.js b/js/world/gen/plan.js
+index ea80e6f..ed1c7eb 100644
+--- a/js/world/gen/plan.js
++++ b/js/world/gen/plan.js
+@@ -21,6 +21,7 @@
+       this.roads = []; this.areas = []; this.buildings = []; this.props = []; this.obs = [];
+       this.decor = []; this.chests = []; this.hints = []; this.roofs = []; this.excl = []; this.dyn = [];
+       this.lots = new G.SHash(1024); this.rh = new G.SHash(768);
++      this.keep = new G.SHash(512); // zonas despejadas alrededor de los edificios (fachada 2,5 m, resto 1,25 m)
+       this.bN = 0; this.cN = 0;
+       this.done = false; this.danger = 0;
+       this.bbox = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+@@ -107,6 +108,8 @@
+         this.dryArea = isFinite(b.x0) ? !T.mayHaveWaterCoarse(b.x0 - 2048, b.y0 - 2048, b.x1 + 2048, b.y1 + 2048) : false;
+       }
+       if (this.dryArea) return true;
++      // margen de 2 m: ningún edificio ni lote pegado a la orilla (las puertas quedarían contra el agua)
++      r = { x: r.x - 2 * M, y: r.y - 2 * M, w: r.w + 4 * M, h: r.h + 4 * M };
+       const nx = Math.max(2, Math.ceil(r.w / (14 * M))), ny = Math.max(2, Math.ceil(r.h / (14 * M)));
+       const cache = this._tc || (this._tc = new Map());
+       for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) {
+@@ -164,13 +167,33 @@
+       if (burn > 0.3 || (b.ruined === undefined && rng.chance(0.05 + 0.025 * Math.min(this.danger, 4)))) b.ruined = true;
+       if (burn > 0.3) b.burned = true;
+       this.buildings.push(b);
++      // zonas despejadas: ningún accesorio (auto, árbol, contenedor, valla...) tapa una puerta exterior
++      const F = 2.5 * M, S = 1.25 * M, f = b.front;
++      const zs = [
++        { x: b.x - (f === 'w' ? F : S), y: b.y, w: f === 'w' ? F : S, h: b.h },
++        { x: b.x + b.w, y: b.y, w: f === 'e' ? F : S, h: b.h },
++        { x: b.x - S, y: b.y - (f === 'n' ? F : S), w: b.w + 2 * S, h: f === 'n' ? F : S },
++        { x: b.x - S, y: b.y + b.h, w: b.w + 2 * S, h: f === 's' ? F : S },
++        { x: b.x, y: b.y, w: b.w, h: b.h, inside: true },
++      ];
++      for (const z of zs) { z.b = b; this.keep.insert(z, z.x, z.y, z.x + z.w, z.y + z.h); }
+       this.grow(b.x - 60, b.y - 60, b.x + b.w + 60, b.y + b.h + 60);
+       return b;
+     }
+     // Accesorio dibujable con obstáculos opcionales
++    // ¿El obstáculo invade la zona despejada de un edificio (o el propio edificio)?
++    keepHit(o) {
++      const ax = o.shape === 'rect' ? o.x : o.cx - o.r, ay = o.shape === 'rect' ? o.y : o.cy - o.r;
++      const bx = o.shape === 'rect' ? o.x + o.w : o.cx + o.r, by = o.shape === 'rect' ? o.y + o.h : o.cy + o.r;
++      return this.keep.query(ax, ay, bx, by, (z) => ax < z.x + z.w && bx > z.x && ay < z.y + z.h && by > z.y);
++    }
+     prop(kind, x, y, extra, obs) {
+       const p = Object.assign({ kind, x, y, seed: this.rng.int(1, 2e9) }, extra || {});
+       p.obs = obs || [];
++      // los accesorios sólidos no tapan puertas: si invaden la zona despejada de un edificio, no se ponen
++      if (p.obs.length && !p.keepOk) {
++        for (const o of p.obs) if (this.keepHit(o)) { p.dropped = true; return p; }
++      }
+       for (const o of p.obs) { o.prop = p; this.obs.push(o); }
+       this.props.push(p);
+       const ext = (p.ext || 40);
+@@ -218,7 +241,7 @@
+         ang, L, W, color: opts.color || rng.pick(CAR_COLORS), burned: opts.burned !== undefined ? opts.burned : rng.chance(0.2),
+         doorOpen: rng.chance(0.3), ext: L / 2 + 30, style: opts.style || rng.int(0, 3), wreck: !!opts.wreck,
+       }, obs);
+-      if (opts.trunk !== false && rng.chance(opts.trunkP === undefined ? 0.55 : opts.trunkP) && !p.burned) {
++      if (opts.trunk !== false && rng.chance(opts.trunkP === undefined ? 0.55 : opts.trunkP) && !p.burned && !p.dropped) {
+         const tx = x - Math.cos(ang) * (L / 2 + 4), ty = y - Math.sin(ang) * (L / 2 + 4);
+         const c = this.chest(tx, ty, opts.container || 'maletero', opts.btype || 'other', opts.boost);
+         p.chestId = c.id;
+@@ -235,7 +258,15 @@
+       const horiz = Math.abs(y1 - y0) < Math.abs(x1 - x0);
+       const th = style === 'concrete' ? 14 : style === 'stone' ? 10 : 5;
+       const a0 = horiz ? Math.min(x0, x1) : Math.min(y0, y1), a1 = horiz ? Math.max(x0, x1) : Math.max(y0, y1);
+-      const cuts = (gaps || []).slice().sort((p, q) => p[0] - q[0]);
++      const cuts = (gaps || []).slice();
++      // la valla se abre donde pasa junto a un edificio (no encierra puertas)
++      const lo = horiz ? Math.min(x0, x1) : Math.min(y0, y1), hi = horiz ? Math.max(x0, x1) : Math.max(y0, y1);
++      const fx0 = horiz ? lo : x0 - th / 2, fy0 = horiz ? y0 - th / 2 : lo, fx1 = horiz ? hi : x0 + th / 2, fy1 = horiz ? y0 + th / 2 : hi;
++      this.keep.query(fx0, fy0, fx1, fy1, (z) => {
++        if (fx0 < z.x + z.w && fx1 > z.x && fy0 < z.y + z.h && fy1 > z.y) cuts.push(horiz ? [z.x - 8, z.x + z.w + 8] : [z.y - 8, z.y + z.h + 8]);
++        return false;
++      });
++      cuts.sort((p, q) => p[0] - q[0]);
+       let cur = a0;
+       const seg = (s0, s1) => {
+         if (s1 - s0 < 6) return;
+diff --git a/js/world/gen/settlements.js b/js/world/gen/settlements.js
+index 0982858..d897bc5 100644
+--- a/js/world/gen/settlements.js
++++ b/js/world/gen/settlements.js
+@@ -704,7 +704,7 @@
+       growStreet(P, s, s.x - Math.cos(a) * R, s.y - Math.sin(a) * R, a, R * 2, { w: 176, kind: 'lane', curv: 0.04, minLen: 40, rmax: 1.1 });
+     }
+     const trunks = inc.map((i) => i.road).concat(P.roads.slice());
+-    const nb = s.shape === 'radial' ? rng.int(2, 4) : rng.int(1, 3);
++    const nb = s.small ? rng.int(0, 1) : s.shape === 'radial' ? rng.int(2, 4) : rng.int(1, 3);
+     for (let k = 0; k < nb; k++) {
+       let x, y, a, parent = null;
+       if (s.shape === 'radial' || !trunks.length) {
+@@ -816,6 +816,8 @@
+     } else if (s.type === 'town') {
+       add('clinic', 0.3); add('police', 0.55); add('school', 0.6); add('church', 0.9); add('supermarket', 0.55); add('hardware', 0.5);
+       add('pharmacy', 0.8); add('gas', 0.75); add('garage', 0.6); add('cemetery', 0.4); add('sports', 0.3); add('park', 0.5); add('warehouse', 0.4);
++    } else if (s.small) {
++      add('farmlot', 0.45); add('store', 0.2); add('garage', 0.2); add('bar', 0.1);
+     } else {
+       add('chapel', 0.4); add('store', 0.55); add('gas', 0.35); add('garage', 0.3); add('farmlot', 0.5, 2); add('cemetery', 0.15); add('bar', 0.25);
+     }
+@@ -1069,7 +1071,7 @@
+ 
+   // ---------- plan completo de un asentamiento ----------
+   WG.Settle = {
+-    LOT, BUILD, inLot, frontPt, lotFence, lastStand, checkpoint, growStreet, storyBuilding,
++    LOT, BUILD, inLot, frontPt, lotFence, lastStand, checkpoint, growStreet, storyBuilding, tryLotAt, build,
+     * plan(world, s) {
+       const P = new WG.Plan(world, s.key, 'settlement', s.seed);
+       P.site = s; P.danger = s.danger;
+diff --git a/js/world/gen/textures.js b/js/world/gen/textures.js
+index 282d6ee..f4720e1 100644
+--- a/js/world/gen/textures.js
++++ b/js/world/gen/textures.js
+@@ -1,73 +1,78 @@
+ // Texturas de suelo y pisos interiores (tileables, generadas una vez al arrancar). TM.WG.Tex
++// Todo procedural y determinista. Cada textura: ruido periódico de baja frecuencia (tonos) + grano fino +
++// detalles dibujados con envoltura en los bordes (sin costuras al repetir).
+ (function () {
+   const U = TM.U;
+   const WG = TM.WG = TM.WG || {};
+   const TILE = 256;
++  const TAU = Math.PI * 2;
+ 
+-  // hash mezclado (evita franjas diagonales con valores enteros pequeños)
+-  function TH(x, y, seed) { return U.hash2(x * 7919 + y * 104729 + 17, (x * 31 + 7) ^ (y * 53), seed); }
+-  function tnoise(x, y, P, seed) {
+-    const ix = Math.floor(x), iy = Math.floor(y);
+-    const fx = x - ix, fy = y - iy;
+-    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+-    const m = (v) => ((v % P) + P) % P;
+-    const a = TH(m(ix), m(iy), seed), b = TH(m(ix + 1), m(iy), seed);
+-    const c = TH(m(ix), m(iy + 1), seed), d = TH(m(ix + 1), m(iy + 1), seed);
+-    return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+-  }
+-
+-  // Paletas de suelo exterior
++  // Paletas de suelo exterior (apagadas, terrosas; buen contraste con jugador y zombies)
+   const PAL = {
+-    forest:   { lo: [33, 30, 23], hi: [62, 56, 41], grain: 14, base: 5, extra: 'leaves' },
+-    plains:   { lo: [56, 54, 39], hi: [88, 84, 60], grain: 14, base: 5, extra: 'grass' },
+-    farmland: { lo: [47, 37, 27], hi: [78, 62, 44], grain: 14, base: 4 },
+-    desert:   { lo: [84, 71, 52], hi: [124, 107, 80], grain: 16, base: 4, extra: 'pebbles' },
+-    swamp:    { lo: [25, 29, 23], hi: [50, 54, 39], grain: 12, base: 6, extra: 'wet' },
+-    urban:    { lo: [43, 42, 39], hi: [70, 68, 62], grain: 18, base: 6, extra: 'pebbles' },
+-    ash:      { lo: [22, 21, 20], hi: [46, 43, 40], grain: 14, base: 6, extra: 'embers' },
+-    drymud:   { lo: [92, 81, 64], hi: [120, 106, 85], grain: 10, base: 3, extra: 'cracks' },
+-    camp:     { lo: [44, 38, 28], hi: [74, 64, 46], grain: 14, base: 5 },
+-    asphalt:  { lo: [31, 31, 33], hi: [52, 52, 54], grain: 20, base: 8 },
+-    dirtroad: { lo: [60, 49, 35], hi: [88, 72, 52], grain: 16, base: 6, extra: 'pebbles' },
+-    concrete: { lo: [76, 75, 70], hi: [98, 96, 90], grain: 12, base: 4, extra: 'joints' },
+-    lawn:     { lo: [48, 52, 35], hi: [74, 78, 51], grain: 14, base: 6, extra: 'grass' },
+-    gravel:   { lo: [66, 63, 56], hi: [94, 90, 80], grain: 30, base: 8 },
+-    field:    { lo: [52, 42, 29], hi: [84, 68, 46], grain: 14, base: 4, extra: 'rows' },
++    forest:   { lo: [30, 29, 22], hi: [58, 54, 39], grain: 14, base: 5 },
++    plains:   { lo: [54, 55, 38], hi: [86, 84, 58], grain: 12, base: 5 },
++    farmland: { lo: [47, 38, 28], hi: [76, 61, 44], grain: 14, base: 4 },
++    desert:   { lo: [96, 82, 60], hi: [132, 115, 86], grain: 12, base: 4 },
++    swamp:    { lo: [26, 30, 24], hi: [50, 54, 39], grain: 12, base: 6 },
++    urban:    { lo: [46, 44, 39], hi: [72, 69, 61], grain: 16, base: 6 },
++    ash:      { lo: [22, 21, 20], hi: [46, 43, 40], grain: 14, base: 6 },
++    drymud:   { lo: [96, 84, 66], hi: [122, 108, 86], grain: 10, base: 3 },
++    camp:     { lo: [46, 40, 30], hi: [74, 64, 46], grain: 14, base: 5 },
++    asphalt:  { lo: [34, 34, 36], hi: [54, 54, 56], grain: 22, base: 6 },
++    dirtroad: { lo: [62, 51, 37], hi: [90, 74, 54], grain: 16, base: 6 },
++    concrete: { lo: [84, 82, 76], hi: [104, 102, 95], grain: 14, base: 4 },
++    pavers:   { lo: [80, 77, 70], hi: [100, 96, 88], grain: 12, base: 4 },
++    lawn:     { lo: [48, 54, 35], hi: [74, 80, 52], grain: 12, base: 6 },
++    gravel:   { lo: [70, 67, 60], hi: [94, 90, 80], grain: 26, base: 8 },
++    field:    { lo: [54, 44, 30], hi: [84, 68, 46], grain: 14, base: 4 },
+   };
+ 
+-  function makeTile(name, seed) {
+-    const pal = PAL[name];
+-    const c = U.makeCanvas(TILE, TILE);
+-    const g = c.getContext('2d');
+-    const P0 = pal.base;
+-    // ruido periódico de baja resolución (celosías precalculadas) que luego se amplía con suavizado
++  // ---------- utilidades ----------
++  function lattice(seed, P0, oct) {
+     const lat = [], Ps = [];
+-    const lr = new U.RNG(seed * 13 + 7);
+-    for (let o = 0, P = P0; o < 3; o++, P *= 2) {
++    const lr = new U.RNG(seed);
++    for (let o = 0, P = P0; o < oct; o++, P *= 2) {
+       const L = new Float32Array(P * P);
+       for (let i = 0; i < L.length; i++) L[i] = lr.next();
+       lat.push(L); Ps.push(P);
+     }
+-    const N = 64, S = N + 2;
+-    const small = U.makeCanvas(S, S), sg = small.getContext("2d");
+-    const img = sg.createImageData(S, S), d = img.data;
+-    for (let j = 0; j < S; j++) {
+-      for (let i = 0; i < S; i++) {
+-        // muestra en el centro del píxel (con un píxel de margen envuelto a cada lado)
+-        let v = 0, amp = 0.5, norm = 0;
+-        for (let o = 0; o < 3; o++) {
+-          const P = Ps[o], L = lat[o];
+-          const u = (i - 0.5) * P / N, w = (j - 0.5) * P / N;
+-          const ix = Math.floor(u), iy = Math.floor(w);
+-          let fx = u - ix, fy = w - iy;
+-          fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+-          const x0 = ((ix % P) + P) % P, x1 = (x0 + 1) % P, y0 = (((iy % P) + P) % P) * P, y1 = ((((iy + 1) % P) + P) % P) * P;
+-          const a = L[y0 + x0], b = L[y0 + x1], c2 = L[y1 + x0], e = L[y1 + x1];
+-          v += (a + (b - a) * fx + (c2 - a) * fy + (a - b - c2 + e) * fx * fy) * amp;
+-          norm += amp; amp *= 0.5;
+-        }
+-        v = U.smoothstep(0.2, 0.8, v / norm);
+-        const k = (j * S + i) * 4;
++    return { lat, Ps };
++  }
++  // ruido periódico (u, v en [0,1)) a partir de celosías
++  function pnoise(N, u, v) {
++    let s = 0, amp = 0.5, norm = 0;
++    for (let o = 0; o < N.Ps.length; o++) {
++      const P = N.Ps[o], L = N.lat[o];
++      const x = u * P, y = v * P;
++      const ix = Math.floor(x), iy = Math.floor(y);
++      let fx = x - ix, fy = y - iy;
++      fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
++      const x0 = ((ix % P) + P) % P, x1 = (x0 + 1) % P, y0 = (((iy % P) + P) % P) * P, y1 = ((((iy + 1) % P) + P) % P) * P;
++      const a = L[y0 + x0], b = L[y0 + x1], c = L[y1 + x0], d = L[y1 + x1];
++      s += (a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy) * amp;
++      norm += amp; amp *= 0.5;
++    }
++    return s / norm;
++  }
++
++  // Dibuja fn(x, y) en la posición y en sus copias envueltas si el detalle (radio r) cruza un borde
++  function wrapAt(g, S, x, y, r, fn) {
++    const xs = [0], ys = [0];
++    if (x - r < 0) xs.push(S); if (x + r > S) xs.push(-S);
++    if (y - r < 0) ys.push(S); if (y + r > S) ys.push(-S);
++    for (const ox of xs) for (const oy of ys) fn(x + ox, y + oy);
++  }
++
++  function baseLayer(g, pal, seed, S) {
++    const N = 64, Sm = N + 2;
++    const nz = lattice(seed * 13 + 7, pal.base, 3);
++    const small = U.makeCanvas(Sm, Sm), sg = small.getContext('2d');
++    const img = sg.createImageData(Sm, Sm), d = img.data;
++    for (let j = 0; j < Sm; j++) {
++      for (let i = 0; i < Sm; i++) {
++        let v = pnoise(nz, (i - 0.5) / N, (j - 0.5) / N);
++        v = U.smoothstep(0.2, 0.8, v);
++        const k = (j * Sm + i) * 4;
+         d[k] = pal.lo[0] + (pal.hi[0] - pal.lo[0]) * v;
+         d[k + 1] = pal.lo[1] + (pal.hi[1] - pal.lo[1]) * v;
+         d[k + 2] = pal.lo[2] + (pal.hi[2] - pal.lo[2]) * v;
+@@ -76,157 +81,394 @@
+     }
+     sg.putImageData(img, 0, 0);
+     g.imageSmoothingEnabled = true;
+-    // el píxel 1 del pequeño cae en el centro del primer bloque de 4 px: sin costuras al repetir
+-    const sc = TILE / N;
+-    g.drawImage(small, 0, 0, S, S, -sc * 1, -sc * 1, S * sc, S * sc);
+-    // grano fino compartido
++    const sc = S / N;
++    g.drawImage(small, 0, 0, Sm, Sm, -sc, -sc, Sm * sc, Sm * sc);
+     g.globalAlpha = Math.min(1, pal.grain / 26);
+-    g.drawImage(grainCanvas(), 0, 0);
++    g.drawImage(grainCanvas(), 0, 0, S, S);
+     g.globalAlpha = 1;
+-    const rng = new U.RNG(seed * 7 + 1);
+-    // detalles repetibles (dibujados con envoltura en los bordes)
+-    // los detalles pequeños se colocan lejos de los bordes (no hace falta repetirlos envueltos)
+-    const wrap = (fn) => fn();
+-    const wrapAll = (fn) => { for (const ox of [-TILE, 0, TILE]) for (const oy of [-TILE, 0, TILE]) { g.save(); g.translate(ox, oy); fn(); g.restore(); } };
+-    switch (pal.extra) {
+-      case 'leaves': {
+-        const pts = [];
+-        for (let i = 0; i < 220; i++) pts.push([rng.range(10, TILE - 10), rng.range(10, TILE - 10), rng.pick(['#4a3a24', '#3c2e1e', '#57472b', '#2e2a1e']), rng.range(0, 3)]);
+-        wrap(() => { for (const p of pts) { g.fillStyle = p[2]; g.save(); g.translate(p[0], p[1]); g.rotate(p[3]); g.fillRect(-2, -1, 4, 2.5); g.restore(); } });
+-        break;
++  }
++
++  // Grietas ramificadas (línea oscura + borde claro)
++  function crack(g, S, rng, x, y, len, w, dark, light) {
++    const pts = [x, y];
++    let a = rng.range(0, TAU);
++    for (let k = 0; k < len; k++) { a += rng.range(-0.7, 0.7); x += Math.cos(a) * rng.range(5, 12); y += Math.sin(a) * rng.range(5, 12); pts.push(x, y); }
++    const draw = (ox, oy) => {
++      g.beginPath(); g.moveTo(pts[0] + ox, pts[1] + oy);
++      for (let k = 2; k < pts.length; k += 2) g.lineTo(pts[k] + ox, pts[k + 1] + oy);
++    };
++    let mnx = 1e9, mny = 1e9, mxx = -1e9, mxy = -1e9;
++    for (let k = 0; k < pts.length; k += 2) { mnx = Math.min(mnx, pts[k]); mxx = Math.max(mxx, pts[k]); mny = Math.min(mny, pts[k + 1]); mxy = Math.max(mxy, pts[k + 1]); }
++    const xs = [0], ys = [0];
++    if (mnx < 0) xs.push(S); if (mxx > S) xs.push(-S);
++    if (mny < 0) ys.push(S); if (mxy > S) ys.push(-S);
++    for (const ox of xs) for (const oy of ys) {
++      if (light) { g.strokeStyle = light; g.lineWidth = w + 0.8; draw(ox + 0.7, oy + 0.7); g.stroke(); }
++      g.strokeStyle = dark; g.lineWidth = w; draw(ox, oy); g.stroke();
++    }
++  }
++
++  function softSpot(g, S, x, y, r, rgba0) {
++    wrapAt(g, S, x, y, r, (px, py) => {
++      const gr = g.createRadialGradient(px, py, 0, px, py, r);
++      gr.addColorStop(0, rgba0); gr.addColorStop(1, rgba0.replace(/[\d.]+\)$/, '0)'));
++      g.fillStyle = gr; g.fillRect(px - r, py - r, r * 2, r * 2);
++    });
++  }
++
++  function blobPath(g, x, y, r, rng, n, jit) {
++    g.beginPath();
++    for (let i = 0; i < n; i++) {
++      const a = (i / n) * TAU, rr = r * (1 - jit + rng.next() * jit * 2);
++      const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
++      if (i) g.lineTo(px, py); else g.moveTo(px, py);
++    }
++    g.closePath();
++  }
++
++  // hojitas de hierba (trazos cortos) en un mechón
++  function tuft(g, x, y, n, L, cols, rng) {
++    g.lineWidth = 1;
++    for (let k = 0; k < n; k++) {
++      const a = -Math.PI / 2 + rng.range(-1.1, 1.1), l = L * rng.range(0.5, 1.1);
++      g.strokeStyle = cols[k % cols.length];
++      g.beginPath(); g.moveTo(x + rng.range(-1.5, 1.5), y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
++    }
++  }
++
++  // ---------- detalles por textura ----------
++  const DETAIL = {
++    asphalt(g, S, rng) {
++      // árido: puntos claros y oscuros
++      for (let i = 0; i < 2600; i++) {
++        g.fillStyle = rng.chance(0.55) ? `rgba(0,0,0,${rng.range(0.12, 0.3).toFixed(2)})` : `rgba(200,195,185,${rng.range(0.05, 0.16).toFixed(2)})`;
++        g.fillRect(rng.range(0, S), rng.range(0, S), rng.range(0.8, 1.8), rng.range(0.8, 1.6));
+       }
+-      case 'grass': {
+-        const pts = [];
+-        for (let i = 0; i < 160; i++) pts.push([rng.range(10, TILE - 10), rng.range(10, TILE - 10), rng.pick(['rgba(110,104,70,0.5)', 'rgba(80,80,52,0.55)', 'rgba(124,112,74,0.4)']), rng.int(3, 6)]);
+-        wrap(() => {
+-          g.lineWidth = 1;
+-          for (const p of pts) {
+-            g.strokeStyle = p[2]; g.beginPath();
+-            for (let k = 0; k < p[3]; k++) { const a = -1.2 - k * 0.35 + (k % 2) * 0.5; g.moveTo(p[0], p[1]); g.lineTo(p[0] + Math.cos(a) * 6, p[1] + Math.sin(a) * 6); }
+-            g.stroke();
+-          }
++      // desgaste claro y parches de alquitrán
++      for (let i = 0; i < 4; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(30, 70), 'rgba(120,118,110,0.10)');
++      for (let i = 0; i < 2; i++) {
++        const w = rng.range(30, 70), h = rng.range(20, 50), x = rng.range(0, S), y = rng.range(0, S);
++        wrapAt(g, S, x + w / 2, y + h / 2, Math.max(w, h), (px, py) => {
++          g.fillStyle = 'rgba(16,16,18,0.42)'; g.fillRect(px - w / 2, py - h / 2, w, h);
++          g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 1; g.strokeRect(px - w / 2, py - h / 2, w, h);
+         });
+-        break;
+       }
+-      case 'pebbles': {
+-        const pts = [];
+-        for (let i = 0; i < 140; i++) pts.push([rng.range(10, TILE - 10), rng.range(10, TILE - 10), rng.range(0.8, 2.2), rng.chance(0.5)]);
+-        wrap(() => { for (const p of pts) { g.fillStyle = p[3] ? 'rgba(0,0,0,0.18)' : 'rgba(255,240,220,0.08)'; g.beginPath(); g.arc(p[0], p[1], p[2], 0, 6.283); g.fill(); } });
+-        break;
++      for (let i = 0; i < 3; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(8, 20), 'rgba(12,10,14,0.38)');
++      for (let i = 0; i < 7; i++) crack(g, S, rng, rng.range(0, S), rng.range(0, S), rng.int(4, 9), rng.range(0.8, 1.4), 'rgba(10,10,12,0.6)', 'rgba(120,118,110,0.12)');
++    },
++    concrete(g, S, rng) {
++      const T = 64;
++      for (let y = 0; y < S; y += T) for (let x = 0; x < S; x += T) {
++        const v = rng.range(-12, 10);
++        g.fillStyle = v > 0 ? `rgba(255,250,240,${(v / 160).toFixed(3)})` : `rgba(0,0,0,${(-v / 140).toFixed(3)})`;
++        g.fillRect(x, y, T, T);
++        if (rng.chance(0.35)) softSpot(g, S, x + rng.range(10, T - 10), y + rng.range(10, T - 10), rng.range(8, 22), 'rgba(30,26,20,0.16)');
+       }
+-      case 'wet': {
+-        const pts = [];
+-        for (let i = 0; i < 26; i++) pts.push([rng.range(10, TILE - 10), rng.range(10, TILE - 10), rng.range(6, 18)]);
+-        wrap(() => { for (const p of pts) { g.fillStyle = 'rgba(12,18,16,0.35)'; g.beginPath(); g.ellipse(p[0], p[1], p[2], p[2] * 0.6, 0.3, 0, 6.283); g.fill(); } });
+-        break;
++      for (let i = 0; i < 900; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.08)'; g.fillRect(rng.range(0, S), rng.range(0, S), 1.2, 1.2); }
++      for (let i = 0; i < 4; i++) crack(g, S, rng, rng.range(0, S), rng.range(0, S), rng.int(3, 6), 0.9, 'rgba(30,28,24,0.5)', null);
++      // juntas con borde claro
++      g.fillStyle = 'rgba(28,26,22,0.5)';
++      for (let i = 0; i < S; i += T) { g.fillRect(i, 0, 1.5, S); g.fillRect(0, i, S, 1.5); }
++      g.fillStyle = 'rgba(255,250,235,0.08)';
++      for (let i = 0; i < S; i += T) { g.fillRect(i + 1.5, 0, 1, S); g.fillRect(0, i + 1.5, S, 1); }
++    },
++    pavers(g, S, rng) {
++      // baldosas de acera 32 u con desgaste
++      const T = 32;
++      for (let y = 0; y < S; y += T) for (let x = 0; x < S; x += T) {
++        const v = rng.range(-14, 10);
++        g.fillStyle = v > 0 ? `rgba(255,250,240,${(v / 150).toFixed(3)})` : `rgba(0,0,0,${(-v / 120).toFixed(3)})`;
++        g.fillRect(x, y, T, T);
++        if (rng.chance(0.08)) { g.fillStyle = 'rgba(20,18,14,0.35)'; g.fillRect(x + 2, y + 2, T - 4, T - 4); }
++        if (rng.chance(0.1)) crack(g, S, rng, x + T / 2, y + T / 2, 2, 0.8, 'rgba(25,22,18,0.55)', null);
+       }
+-      case 'embers': {
+-        const pts = [];
+-        for (let i = 0; i < 90; i++) pts.push([rng.range(10, TILE - 10), rng.range(10, TILE - 10), rng.chance(0.15)]);
+-        wrap(() => { for (const p of pts) { g.fillStyle = p[2] ? 'rgba(120,50,20,0.5)' : 'rgba(0,0,0,0.35)'; g.fillRect(p[0], p[1], 2, 2); } });
+-        break;
++      for (let i = 0; i < 700; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.07)'; g.fillRect(rng.range(0, S), rng.range(0, S), 1.2, 1.2); }
++      g.fillStyle = 'rgba(24,22,18,0.55)';
++      for (let i = 0; i < S; i += T) { g.fillRect(i, 0, 1.2, S); g.fillRect(0, i, S, 1.2); }
++      // hierba en las juntas
++      g.lineWidth = 1;
++      for (let i = 0; i < 26; i++) {
++        const onX = rng.chance(0.5), a = Math.floor(rng.range(0, S / T)) * T, b = rng.range(0, S);
++        const x = onX ? a : b, y = onX ? b : a;
++        tuft(g, x, y, rng.int(2, 4), 5, ['rgba(80,88,52,0.8)', 'rgba(98,100,62,0.7)'], rng);
+       }
+-      case 'cracks': {
+-        const segs = [];
+-        for (let i = 0; i < 26; i++) {
+-          let x = rng.range(0, TILE), y = rng.range(0, TILE);
+-          const s = [x, y];
+-          for (let k = 0; k < 4; k++) { x += rng.range(-22, 22); y += rng.range(-22, 22); s.push(x, y); }
+-          segs.push(s);
+-        }
+-        wrapAll(() => {
+-          g.strokeStyle = 'rgba(50,40,28,0.55)'; g.lineWidth = 1.3;
+-          for (const s of segs) { g.beginPath(); g.moveTo(s[0], s[1]); for (let k = 2; k < s.length; k += 2) g.lineTo(s[k], s[k + 1]); g.stroke(); }
++    },
++    plains(g, S, rng) { grassDetail(g, S, rng, 1); },
++    lawn(g, S, rng) { grassDetail(g, S, rng, 1.25); },
++    forest(g, S, rng) {
++      // musgo
++      for (let i = 0; i < 7; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(18, 40), 'rgba(52,62,34,0.35)');
++      // hojarasca
++      const cols = ['#4a3a24', '#3c2e1e', '#57472b', '#2e2a1e', '#5e4a2c', '#43381f', '#6a5432'];
++      for (let i = 0; i < 520; i++) {
++        const x = rng.range(0, S), y = rng.range(0, S), a = rng.range(0, TAU), l = rng.range(1.8, 3.6);
++        const c = cols[rng.int(0, cols.length - 1)];
++        wrapAt(g, S, x, y, 4, (px, py) => {
++          g.fillStyle = c; g.beginPath(); g.ellipse(px, py, l, l * 0.55, a, 0, TAU); g.fill();
+         });
+-        break;
+       }
+-      case 'joints': {
+-        g.strokeStyle = 'rgba(30,30,28,0.35)'; g.lineWidth = 1.5;
+-        g.beginPath();
+-        for (let i = 0; i <= TILE; i += 64) { g.moveTo(i, 0); g.lineTo(i, TILE); g.moveTo(0, i); g.lineTo(TILE, i); }
+-        g.stroke();
+-        break;
++      // ramitas y agujas
++      g.lineWidth = 1;
++      for (let i = 0; i < 70; i++) {
++        const x = rng.range(4, S - 4), y = rng.range(4, S - 4), a = rng.range(0, TAU), l = rng.range(3, 11);
++        g.strokeStyle = rng.chance(0.5) ? 'rgba(30,24,16,0.7)' : 'rgba(90,74,50,0.5)';
++        g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
++      }
++      for (let i = 0; i < 40; i++) tuft(g, rng.range(6, S - 6), rng.range(6, S - 6), rng.int(2, 5), 6, ['rgba(70,74,44,0.75)', 'rgba(56,60,36,0.8)'], rng);
++    },
++    farmland(g, S, rng) {
++      for (let i = 0; i < 260; i++) {
++        const x = rng.range(3, S - 3), y = rng.range(3, S - 3), r = rng.range(1, 3);
++        g.fillStyle = 'rgba(20,14,8,0.35)'; g.beginPath(); g.arc(x + 0.8, y + 0.8, r, 0, TAU); g.fill();
++        g.fillStyle = 'rgba(120,100,70,0.3)'; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+       }
+-      case 'rows': {
+-        // surcos de cultivo (horizontales; se giran al dibujar)
+-        for (let y = 0; y < TILE; y += 16) {
+-          g.fillStyle = 'rgba(20,14,8,0.35)'; g.fillRect(0, y, TILE, 5);
+-          g.fillStyle = 'rgba(140,120,80,0.12)'; g.fillRect(0, y + 8, TILE, 3);
++      for (let i = 0; i < 30; i++) tuft(g, rng.range(6, S - 6), rng.range(6, S - 6), 3, 5, ['rgba(110,100,62,0.6)'], rng);
++    },
++    desert(g, S, rng) {
++      // ondas de arena (periódicas en x)
++      const k1 = rng.int(1, 2), ph = rng.range(0, TAU);
++      for (let y0 = 0; y0 < S; y0 += 9) {
++        const amp = 3 + (y0 % 27) / 9;
++        for (const [col, dy] of [['rgba(60,46,28,0.16)', 1.6], ['rgba(255,240,210,0.10)', 0]]) {
++          g.strokeStyle = col; g.lineWidth = 1.4;
++          g.beginPath();
++          for (let x = 0; x <= S; x += 4) {
++            const y = y0 + dy + Math.sin((x / S) * TAU * k1 + ph + y0 * 0.11) * amp + Math.sin((x / S) * TAU * 3 + y0) * 1.2;
++            if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
++          }
++          g.stroke();
+         }
+-        for (let i = 0; i < 140; i++) {
+-          const x = rng.range(0, TILE), y = Math.floor(rng.range(0, 16)) * 16 + 9;
+-          g.fillStyle = rng.pick(['rgba(90,80,40,0.7)', 'rgba(70,64,34,0.7)', 'rgba(110,92,50,0.6)']);
+-          g.fillRect(x, y - 2, rng.range(2, 5), 4);
++      }
++      for (let i = 0; i < 90; i++) {
++        const x = rng.range(3, S - 3), y = rng.range(3, S - 3), r = rng.range(0.8, 2.4);
++        g.fillStyle = 'rgba(40,30,20,0.3)'; g.beginPath(); g.arc(x + 0.7, y + 0.8, r, 0, TAU); g.fill();
++        g.fillStyle = rng.pick(['#8a7a62', '#6e604c', '#a08e70']); g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
++      }
++      for (let i = 0; i < 6; i++) tuft(g, rng.range(8, S - 8), rng.range(8, S - 8), rng.int(4, 7), 7, ['rgba(120,104,66,0.8)', 'rgba(96,84,52,0.8)'], rng);
++    },
++    swamp(g, S, rng) {
++      for (let i = 0; i < 18; i++) {
++        const x = rng.range(0, S), y = rng.range(0, S), r = rng.range(8, 24);
++        wrapAt(g, S, x, y, r * 1.2, (px, py) => {
++          g.fillStyle = 'rgba(12,18,16,0.42)'; blobPath(g, px, py, r, new U.RNG((x * 7 + y) | 0), 9, 0.3); g.fill();
++          g.fillStyle = 'rgba(130,150,150,0.06)'; g.beginPath(); g.ellipse(px - r * 0.2, py - r * 0.2, r * 0.5, r * 0.2, -0.4, 0, TAU); g.fill();
++        });
++      }
++      for (let i = 0; i < 10; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(12, 30), 'rgba(60,72,34,0.3)');
++      for (let i = 0; i < 50; i++) tuft(g, rng.range(6, S - 6), rng.range(6, S - 6), rng.int(3, 6), 8, ['rgba(70,78,46,0.85)', 'rgba(54,60,36,0.85)'], rng);
++    },
++    urban(g, S, rng) {
++      // solar urbano: tierra apisonada, grava, cascotes, basura
++      for (let i = 0; i < 6; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(20, 50), 'rgba(90,86,76,0.18)');
++      for (let i = 0; i < 260; i++) {
++        const x = rng.range(2, S - 2), y = rng.range(2, S - 2), r = rng.range(0.7, 2);
++        g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.25)' : 'rgba(150,145,130,0.18)'; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
++      }
++      for (let i = 0; i < 14; i++) {
++        const x = rng.range(6, S - 6), y = rng.range(6, S - 6);
++        g.save(); g.translate(x, y); g.rotate(rng.range(0, TAU));
++        g.fillStyle = rng.pick(['rgba(110,106,96,0.6)', 'rgba(70,66,60,0.6)', 'rgba(120,96,70,0.5)']); g.fillRect(-2, -1.5, rng.range(3, 6), rng.range(2, 4));
++        g.restore();
++      }
++      for (let i = 0; i < 26; i++) tuft(g, rng.range(6, S - 6), rng.range(6, S - 6), rng.int(2, 5), 6, ['rgba(84,86,54,0.75)', 'rgba(104,98,64,0.7)'], rng);
++      for (let i = 0; i < 3; i++) crack(g, S, rng, rng.range(0, S), rng.range(0, S), 4, 0.9, 'rgba(20,18,14,0.4)', null);
++    },
++    ash(g, S, rng) {
++      for (let i = 0; i < 400; i++) { g.fillStyle = rng.chance(0.6) ? 'rgba(0,0,0,0.35)' : 'rgba(150,145,140,0.14)'; g.fillRect(rng.range(0, S), rng.range(0, S), rng.range(1, 2.5), rng.range(1, 2.5)); }
++      for (let i = 0; i < 14; i++) { g.fillStyle = 'rgba(150,60,24,0.45)'; g.fillRect(rng.range(4, S - 4), rng.range(4, S - 4), 1.5, 1.5); }
++      g.lineWidth = 2;
++      for (let i = 0; i < 18; i++) { const x = rng.range(10, S - 10), y = rng.range(10, S - 10), a = rng.range(0, TAU), l = rng.range(5, 14); g.strokeStyle = 'rgba(8,8,8,0.6)'; g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
++    },
++    drymud(g, S, rng) {
++      // celdas de Voronoi periódicas: placas de barro cuarteado
++      const pts = [];
++      for (let i = 0; i < 46; i++) pts.push([rng.range(0, S), rng.range(0, S)]);
++      const img = g.getImageData(0, 0, S, S), d = img.data;
++      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
++        let d1 = 1e9, d2 = 1e9;
++        for (const p of pts) {
++          let dx = Math.abs(x - p[0]), dy = Math.abs(y - p[1]);
++          if (dx > S / 2) dx = S - dx; if (dy > S / 2) dy = S - dy;
++          const dd = dx * dx + dy * dy;
++          if (dd < d1) { d2 = d1; d1 = dd; } else if (dd < d2) d2 = dd;
+         }
+-        break;
++        const e = Math.sqrt(d2) - Math.sqrt(d1);
++        const k = (y * S + x) * 4;
++        let f = 1;
++        if (e < 1.1) f = 0.62; else if (e < 2.2) f = 0.88; else f = 1 + Math.min(0.08, (e - 2.2) * 0.006);
++        d[k] *= f; d[k + 1] *= f; d[k + 2] *= f;
++      }
++      g.putImageData(img, 0, 0);
++    },
++    camp(g, S, rng) {
++      for (let i = 0; i < 200; i++) { const x = rng.range(2, S - 2), y = rng.range(2, S - 2); g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.2)' : 'rgba(150,130,100,0.15)'; g.beginPath(); g.arc(x, y, rng.range(0.8, 2), 0, TAU); g.fill(); }
++      for (let i = 0; i < 20; i++) tuft(g, rng.range(6, S - 6), rng.range(6, S - 6), 3, 5, ['rgba(90,88,56,0.7)'], rng);
++    },
++    dirtroad(g, S, rng) {
++      for (let i = 0; i < 300; i++) {
++        const x = rng.range(2, S - 2), y = rng.range(2, S - 2), r = rng.range(0.8, 2.6);
++        g.fillStyle = 'rgba(25,18,10,0.3)'; g.beginPath(); g.arc(x + 0.7, y + 0.7, r, 0, TAU); g.fill();
++        g.fillStyle = rng.pick(['rgba(130,112,86,0.5)', 'rgba(100,88,70,0.5)', 'rgba(150,134,108,0.4)']); g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
++      }
++      for (let i = 0; i < 5; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(10, 26), 'rgba(30,22,14,0.25)');
++    },
++    gravel(g, S, rng) {
++      for (let i = 0; i < 1500; i++) {
++        const x = rng.range(2, S - 2), y = rng.range(2, S - 2), r = rng.range(1, 2.8);
++        const v = rng.int(60, 120);
++        g.fillStyle = 'rgba(0,0,0,0.3)'; g.beginPath(); g.ellipse(x + 0.6, y + 0.8, r, r * 0.8, 0, 0, TAU); g.fill();
++        g.fillStyle = `rgb(${v},${v - 3},${v - 9})`; g.beginPath(); g.ellipse(x, y, r, r * 0.8, rng.range(0, 3), 0, TAU); g.fill();
++      }
++    },
++    field(g, S, rng) {
++      // surcos de cultivo (horizontales; se giran al dibujar)
++      for (let y = 0; y < S; y += 16) {
++        g.fillStyle = 'rgba(20,14,8,0.38)'; g.fillRect(0, y, S, 5);
++        g.fillStyle = 'rgba(140,120,80,0.14)'; g.fillRect(0, y + 8, S, 3);
+       }
++      for (let i = 0; i < 260; i++) {
++        const x = rng.range(4, S - 4), y = Math.floor(rng.range(0, 16)) * 16 + 10;
++        tuft(g, x, y, rng.int(2, 4), 5, rng.chance(0.6) ? ['rgba(120,104,58,0.8)', 'rgba(96,84,44,0.8)'] : ['rgba(80,84,46,0.8)'], rng);
++      }
++    },
++  };
++
++  function grassDetail(g, S, rng, lush) {
++    // matas oscuras y claras, calvas de tierra, mechones de varios tonos, flores secas
++    for (let i = 0; i < 10; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(14, 36), rng.chance(0.5) ? 'rgba(30,34,18,0.28)' : 'rgba(120,112,70,0.16)');
++    for (let i = 0; i < 4; i++) softSpot(g, S, rng.range(0, S), rng.range(0, S), rng.range(8, 18), 'rgba(70,56,36,0.35)');
++    const cols = [
++      ['rgba(78,84,48,0.85)', 'rgba(96,98,60,0.8)'], ['rgba(110,104,64,0.75)', 'rgba(126,114,72,0.7)'],
++      ['rgba(58,66,38,0.85)', 'rgba(70,78,44,0.8)'], ['rgba(88,96,56,0.8)', 'rgba(64,72,40,0.85)'],
++    ];
++    g.lineWidth = 1;
++    const n = Math.round(330 * lush);
++    for (let i = 0; i < n; i++) tuft(g, rng.range(7, S - 7), rng.range(7, S - 7), rng.int(3, 6), rng.range(4, 7), cols[rng.int(0, 3)], rng);
++    for (let i = 0; i < 26; i++) {
++      const x = rng.range(4, S - 4), y = rng.range(4, S - 4);
++      g.fillStyle = rng.pick(['rgba(190,170,110,0.7)', 'rgba(170,150,150,0.55)', 'rgba(200,190,160,0.6)', 'rgba(150,110,80,0.6)']);
++      for (let k = 0; k < 3; k++) g.fillRect(x + rng.range(-3, 3), y + rng.range(-3, 3), 1.6, 1.6);
+     }
++  }
++
++  function makeTile(name, seed) {
++    const pal = PAL[name];
++    const c = U.makeCanvas(TILE, TILE);
++    const g = c.getContext('2d', { willReadFrequently: name === 'drymud' });
++    baseLayer(g, pal, seed, TILE);
++    const rng = new U.RNG(seed * 7 + 1);
++    if (DETAIL[name]) DETAIL[name](g, TILE, rng);
+     return c;
+   }
+ 
+-  // ---------- Pisos interiores (patrones pequeños dibujados) ----------
++  // ---------- Pisos interiores (128 px) ----------
+   function floorTile(kind, seed) {
+     const S = 128;
+     const c = U.makeCanvas(S, S), g = c.getContext('2d');
+     const rng = new U.RNG(seed);
++    const speck = (n, a1, a2) => { for (let i = 0; i < n; i++) { g.fillStyle = rng.chance(0.5) ? `rgba(0,0,0,${a1})` : `rgba(255,255,255,${a2})`; g.fillRect(rng.range(0, S), rng.range(0, S), 1, 1); } };
+     switch (kind) {
+       case 'wood': case 'woodDark': {
+-        const base = kind === 'wood' ? [104, 76, 50] : [72, 52, 36];
+-        for (let y = 0; y < S; y += 10) {
++        const base = kind === 'wood' ? [108, 80, 54] : [70, 52, 38];
++        const PH = 12;
++        for (let y = 0; y < S; y += PH) {
+           let x = -rng.range(0, 60);
+-          while (x < S) {
+-            const L = rng.range(40, 90), f = rng.range(0.82, 1.12);
++          const row = [];
++          while (x < S) { const L = rng.range(44, 96); row.push([x, L, rng.range(0.8, 1.12)]); x += L; }
++          // tabla que cruza el borde derecho: repetirla a la izquierda
++          const last = row[row.length - 1];
++          const all = row.concat([[last[0] - S, last[1], last[2]], [row[0][0] + S, row[0][1], row[0][2]]]);
++          for (const [px, L, f] of all) {
+             g.fillStyle = U.rgb(base[0] * f, base[1] * f, base[2] * f);
+-            g.fillRect(x, y, L, 10);
+-            g.fillStyle = 'rgba(0,0,0,0.28)'; g.fillRect(x, y, 1, 10);
+-            x += L;
++            g.fillRect(px, y, L, PH);
++            // veta
++            g.strokeStyle = 'rgba(30,18,8,0.18)'; g.lineWidth = 0.7;
++            const gr = new U.RNG(((px * 13 + y * 7) | 0) + seed);
++            for (let k = 0; k < 3; k++) {
++              const yy = y + gr.range(2, PH - 2);
++              g.beginPath(); g.moveTo(px, yy);
++              for (let xx = px; xx < px + L; xx += 8) g.lineTo(xx, yy + Math.sin(xx * 0.15 + k) * 0.8);
++              g.stroke();
++            }
++            if (gr.chance(0.15)) { g.fillStyle = 'rgba(30,18,8,0.3)'; g.beginPath(); g.ellipse(px + gr.range(8, L - 8), y + PH / 2, 2.5, 1.5, 0, 0, TAU); g.fill(); }
++            g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(px, y, 1, PH);
++            g.fillStyle = 'rgba(255,230,200,0.06)'; g.fillRect(px + 1, y, L - 1, 1);
+           }
+-          g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(0, y + 9, S, 1);
++          g.fillStyle = 'rgba(0,0,0,0.38)'; g.fillRect(0, y + PH - 1, S, 1);
+         }
+-        // las tablas se cortan en el borde: repetir la fila envolviendo
++        // desgaste en zonas de paso
++        for (let i = 0; i < 3; i++) { const x = rng.range(0, S), y = rng.range(0, S), r = rng.range(20, 40); const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(0,0,0,0.12)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
+         break;
+       }
+       case 'tile': case 'tileCheck': case 'stone': {
+         const T = kind === 'stone' ? 32 : 16;
+         for (let y = 0; y < S; y += T) for (let x = 0; x < S; x += T) {
+-          let v;
+-          if (kind === 'tileCheck') v = ((x / T + y / T) % 2) ? 150 : 92;
+-          else if (kind === 'stone') v = 118 + rng.range(-10, 10);
+-          else v = 138 + rng.range(-8, 8);
+-          g.fillStyle = kind === 'stone' ? U.rgb(v, v * 0.94, v * 0.84) : U.rgb(v, v * 1.0, v * 0.97);
+-          g.fillRect(x, y, T, T);
++          let col;
++          if (kind === 'tileCheck') { const dark = ((x / T + y / T) % 2) === 1; const v = rng.range(-6, 6); col = dark ? [70 + v, 72 + v, 70 + v] : [156 + v, 152 + v, 140 + v]; }
++          else if (kind === 'stone') { const v = 116 + rng.range(-12, 10); col = [v, v * 0.95, v * 0.86]; }
++          else { const v = 140 + rng.range(-9, 8); col = [v * 0.97, v, v * 0.98]; }
++          g.fillStyle = U.rgb(col[0], col[1], col[2]); g.fillRect(x, y, T, T);
++          // brillo arriba-izquierda, sombra abajo-derecha
++          g.fillStyle = 'rgba(255,255,255,0.10)'; g.fillRect(x + 1, y + 1, T - 2, 1); g.fillRect(x + 1, y + 1, 1, T - 2);
++          g.fillStyle = 'rgba(0,0,0,0.10)'; g.fillRect(x + 1, y + T - 2, T - 2, 1); g.fillRect(x + T - 2, y + 1, 1, T - 2);
++          if (kind === 'stone' && rng.chance(0.5)) { g.strokeStyle = 'rgba(80,72,64,0.25)'; g.lineWidth = 0.8; g.beginPath(); g.moveTo(x + rng.range(0, T), y); g.quadraticCurveTo(x + rng.range(0, T), y + T / 2, x + rng.range(0, T), y + T); g.stroke(); }
++          if (rng.chance(0.03)) { g.strokeStyle = 'rgba(30,30,28,0.5)'; g.lineWidth = 0.8; g.beginPath(); g.moveTo(x + 2, y + rng.range(2, T - 2)); g.lineTo(x + T / 2, y + T / 2); g.lineTo(x + rng.range(2, T - 2), y + T - 2); g.stroke(); }
+         }
+-        g.fillStyle = 'rgba(30,30,28,0.45)';
++        g.fillStyle = 'rgba(40,38,34,0.55)';
+         for (let i = 0; i < S; i += T) { g.fillRect(i, 0, 1, S); g.fillRect(0, i, S, 1); }
++        // mugre
++        for (let i = 0; i < 4; i++) { const x = rng.range(10, S - 10), y = rng.range(10, S - 10), r = rng.range(10, 26); const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(40,34,24,0.14)'); gr.addColorStop(1, 'rgba(40,34,24,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
++        speck(220, 0.08, 0.05);
+         break;
+       }
+       case 'lino': {
+-        g.fillStyle = '#7d8478'; g.fillRect(0, 0, S, S);
+-        for (let i = 0; i < 500; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)'; g.fillRect(rng.int(0, S), rng.int(0, S), 2, 2); }
+-        g.fillStyle = 'rgba(0,0,0,0.12)'; g.fillRect(0, 0, S, 1); g.fillRect(0, 0, 1, S);
++        g.fillStyle = '#7a8176'; g.fillRect(0, 0, S, S);
++        speck(900, 0.1, 0.08);
++        for (let i = 0; i < 260; i++) { g.fillStyle = rng.pick(['rgba(60,70,60,0.25)', 'rgba(150,150,140,0.2)']); g.fillRect(rng.range(0, S), rng.range(0, S), 2, 1); }
++        // marcas de arrastre
++        g.strokeStyle = 'rgba(30,30,28,0.12)'; g.lineWidth = 1;
++        for (let i = 0; i < 6; i++) { const x = rng.range(10, S - 10), y = rng.range(10, S - 10); g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + rng.range(-20, 20), y + rng.range(-10, 10), x + rng.range(-30, 30), y + rng.range(-12, 12)); g.stroke(); }
++        g.fillStyle = 'rgba(0,0,0,0.14)'; g.fillRect(0, 0, S, 1); g.fillRect(0, S / 2, S, 1);
+         break;
+       }
+       case 'concreteF': {
+-        g.fillStyle = '#5c5b57'; g.fillRect(0, 0, S, S);
+-        for (let i = 0; i < 400; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.05)'; const r = rng.range(1, 4); g.fillRect(rng.int(0, S), rng.int(0, S), r, r); }
++        g.fillStyle = '#5e5d59'; g.fillRect(0, 0, S, S);
++        for (let i = 0; i < 5; i++) { const x = rng.range(0, S), y = rng.range(0, S), r = rng.range(14, 34); const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, rng.chance(0.5) ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.05)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
++        for (let i = 0; i < 500; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.05)'; const r = rng.range(0.8, 2.5); g.fillRect(rng.range(0, S), rng.range(0, S), r, r); }
++        g.strokeStyle = 'rgba(20,20,18,0.35)'; g.lineWidth = 0.8;
++        for (let i = 0; i < 2; i++) { let x = rng.range(20, S - 20), y = rng.range(20, S - 20); g.beginPath(); g.moveTo(x, y); for (let k = 0; k < 4; k++) { x += rng.range(-10, 10); y += rng.range(-10, 10); g.lineTo(x, y); } g.stroke(); }
+         g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(0, 0, S, 1); g.fillRect(0, 0, 1, S);
+         break;
+       }
+       case 'carpet': {
+-        const col = rng.pick([[86, 40, 38], [44, 52, 70], [70, 62, 44]]);
++        const col = [64, 52, 46];
+         g.fillStyle = U.rgb(col[0], col[1], col[2]); g.fillRect(0, 0, S, S);
+-        for (let i = 0; i < 900; i++) { g.fillStyle = rng.chance(0.5) ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.05)'; g.fillRect(rng.int(0, S), rng.int(0, S), 1, 1); }
++        // trama
++        for (let y = 0; y < S; y += 2) { g.fillStyle = y % 4 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.03)'; g.fillRect(0, y, S, 1); }
++        speck(1400, 0.12, 0.05);
++        // dibujo geométrico apagado
++        g.strokeStyle = 'rgba(120,96,70,0.18)'; g.lineWidth = 2;
++        for (let y = 16; y < S; y += 32) for (let x = 16; x < S; x += 32) { g.beginPath(); g.moveTo(x, y - 8); g.lineTo(x + 8, y); g.lineTo(x, y + 8); g.lineTo(x - 8, y); g.closePath(); g.stroke(); }
++        for (let i = 0; i < 3; i++) { const x = rng.range(16, S - 16), y = rng.range(16, S - 16), r = rng.range(8, 18); const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(20,14,10,0.3)'); gr.addColorStop(1, 'rgba(20,14,10,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
+         break;
+       }
+       case 'metal': {
+-        g.fillStyle = '#4c4f50'; g.fillRect(0, 0, S, S);
+-        g.fillStyle = 'rgba(255,255,255,0.08)';
+-        for (let y = 0; y < S; y += 8) for (let x = (y / 8 % 2) * 4; x < S; x += 8) g.fillRect(x, y, 4, 1.5);
++        g.fillStyle = '#4a4d4e'; g.fillRect(0, 0, S, S);
++        for (let y = 0; y < S; y += 8) for (let x = (y / 8 % 2) * 4; x < S; x += 8) {
++          g.save(); g.translate(x + 2, y + 2); g.rotate(y / 8 % 2 ? 0.6 : -0.6);
++          g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(-2.5, -0.8, 5, 1.2);
++          g.fillStyle = 'rgba(0,0,0,0.2)'; g.fillRect(-2.5, 0.4, 5, 0.8);
++          g.restore();
++        }
++        for (let i = 0; i < 4; i++) { const x = rng.range(10, S - 10), y = rng.range(10, S - 10), r = rng.range(8, 20); const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(110,60,30,0.25)'); gr.addColorStop(1, 'rgba(110,60,30,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
++        g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(0, 0, S, 1); g.fillRect(0, 0, 1, S);
+         break;
+       }
+       case 'dirtF': {
+         g.fillStyle = '#4d4030'; g.fillRect(0, 0, S, S);
+-        for (let i = 0; i < 300; i++) { g.fillStyle = rng.pick(['rgba(0,0,0,0.15)', 'rgba(150,120,60,0.15)']); g.fillRect(rng.int(0, S), rng.int(0, S), rng.range(1, 4), 1); }
++        for (let i = 0; i < 400; i++) { g.fillStyle = rng.pick(['rgba(0,0,0,0.15)', 'rgba(150,120,60,0.15)']); g.fillRect(rng.int(0, S), rng.int(0, S), rng.range(1, 4), 1); }
++        g.strokeStyle = 'rgba(160,140,80,0.35)'; g.lineWidth = 1;
++        for (let i = 0; i < 30; i++) { const x = rng.range(4, S - 4), y = rng.range(4, S - 4), a = rng.range(0, TAU); g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * 6, y + Math.sin(a) * 6); g.stroke(); }
+         break;
+       }
+     }
+diff --git a/js/world/render/draw.js b/js/world/render/draw.js
+index ba0adcf..147a3e2 100644
+--- a/js/world/render/draw.js
++++ b/js/world/render/draw.js
+@@ -20,7 +20,117 @@
+     if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+   }
+ 
+-  const D = { blob };
++  // Sol: las sombras caen hacia abajo-derecha (luz desde arriba-izquierda) en todo el mundo.
++  const SUN = { x: 0.6, y: 0.8 };
++  const SPM = 5;   // unidades de sombra por metro de altura
++  const LOWQ = () => TM.Config.quality === 'low';
++  // color hex -> rgb() escalado (acepta también 'rgb(...)' devolviéndolo tal cual)
++  function sh(hex, f) { return hex && hex[0] === '#' ? U.shade(hex, f) : hex; }
++  function mix(hexA, hexB, t) {
++    const a = U.hexToRgb(hexA), b = U.hexToRgb(hexB);
++    return U.rgb(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
++  }
++  // Silueta "de hojas": contorno festoneado
++  function leafy(ctx, x, y, r, rng, n) {
++    ctx.beginPath();
++    n = n || 14;
++    for (let i = 0; i <= n; i++) {
++      const a = (i / n) * TAU;
++      const rr = r * (0.86 + rng.next() * 0.2);
++      const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
++      if (i === 0) ctx.moveTo(px, py);
++      else {
++        const am = ((i - 0.5) / n) * TAU, rm = r * (1.02 + rng.next() * 0.12);
++        ctx.quadraticCurveTo(x + Math.cos(am) * rm, y + Math.sin(am) * rm, px, py);
++      }
++    }
++    ctx.closePath();
++  }
++  // Sombra proyectada de un rectángulo alineado (barrido en la dirección del sol), con penumbra por capas
++  function castRect(ctx, x, y, w, h, len, a) {
++    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
++    for (const [k, f] of layers) {
++      const dx = SUN.x * len * k, dy = SUN.y * len * k;
++      ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
++      ctx.beginPath();
++      ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w + dx, y + dy);
++      ctx.lineTo(x + w + dx, y + h + dy); ctx.lineTo(x + dx, y + h + dy); ctx.lineTo(x, y + h);
++      ctx.closePath(); ctx.fill();
++    }
++  }
++  function castCircle(ctx, cx, cy, r, len, a) {
++    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
++    ctx.lineCap = 'round';
++    for (const [k, f] of layers) {
++      ctx.strokeStyle = ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
++      ctx.lineWidth = r * 2;
++      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + SUN.x * len * k + 0.01, cy + SUN.y * len * k); ctx.stroke();
++    }
++    ctx.lineCap = 'butt';
++  }
++  // Sombra de un rectángulo girado (centro, ángulo, largo L, ancho W)
++  function castRot(ctx, x, y, ang, L, W, len, a) {
++    const c = Math.cos(ang), s = Math.sin(ang);
++    const cs = [[-L / 2, -W / 2], [L / 2, -W / 2], [L / 2, W / 2], [-L / 2, W / 2]].map(([u, v]) => [x + u * c - v * s, y + u * s + v * c]);
++    const layers = LOWQ() ? [[1, 1]] : [[0.55, 0.5], [0.8, 0.3], [1.08, 0.28]];
++    for (const [k, f] of layers) {
++      const dx = SUN.x * len * k, dy = SUN.y * len * k;
++      const pts = cs.concat(cs.map((p) => [p[0] + dx, p[1] + dy]));
++      ctx.fillStyle = `rgba(0,0,0,${(a * f).toFixed(3)})`;
++      hullPath(ctx, pts); ctx.fill();
++    }
++  }
++  // Envolvente convexa (puntos pocos) como trazado
++  function hullPath(ctx, pts) {
++    pts = pts.slice().sort((p, q) => p[0] - q[0] || p[1] - q[1]);
++    const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
++    const lo = [], up = [];
++    for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
++    for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
++    const h = lo.slice(0, -1).concat(up.slice(0, -1));
++    ctx.beginPath(); ctx.moveTo(h[0][0], h[0][1]);
++    for (let i = 1; i < h.length; i++) ctx.lineTo(h[i][0], h[i][1]);
++    ctx.closePath();
++  }
++  // Oclusión ambiental en el borde interior de un rectángulo
++  function aoInside(ctx, x, y, w, h, s, a) {
++    const side = (x0, y0, x1, y1, rx, ry, rw, rh) => {
++      const g = ctx.createLinearGradient(x0, y0, x1, y1);
++      g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
++      ctx.fillStyle = g; ctx.fillRect(rx, ry, rw, rh);
++    };
++    s = Math.min(s, w / 2, h / 2);
++    side(x, y, x, y + s, x, y, w, s);
++    side(x, y + h, x, y + h - s, x, y + h - s, w, s);
++    side(x, y, x + s, y, x, y, s, h);
++    side(x + w, y, x + w - s, y, x + w - s, y, s, h);
++  }
++  // Oclusión de contacto alrededor de una huella (fuera)
++  function aoOutside(ctx, x, y, w, h, s, a) {
++    ctx.strokeStyle = `rgba(0,0,0,${a})`;
++    for (let k = 1; k <= 3; k++) { ctx.lineWidth = s * k * 0.66; ctx.strokeRect(x, y, w, h); }
++  }
++  // Caja con bisel: cara superior con borde iluminado (arriba-izq.) y borde en sombra (abajo-der.)
++  function box(ctx, x, y, w, h, col, hgt) {
++    if (hgt) castRect(ctx, x, y, w, h, hgt, 0.32);
++    ctx.fillStyle = sh(col, 0.62); ctx.fillRect(x, y, w, h);
++    ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, w - 2.5, h - 2.5);
++    ctx.fillStyle = 'rgba(255,245,225,0.13)'; ctx.fillRect(x + 1, y + 1, w - 2.5, 1.2); ctx.fillRect(x + 1, y + 1, 1.2, h - 2.5);
++  }
++  // Polilínea desplazada lateralmente d (normales por vértice)
++  function offsetPts(p, d) {
++    const out = [];
++    const n = p.length / 2;
++    for (let i = 0; i < n; i++) {
++      const ax = p[Math.max(0, i - 1) * 2], ay = p[Math.max(0, i - 1) * 2 + 1];
++      const bx = p[Math.min(n - 1, i + 1) * 2], by = p[Math.min(n - 1, i + 1) * 2 + 1];
++      let dx = bx - ax, dy = by - ay; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
++      out.push(p[i * 2] - dy * d, p[i * 2 + 1] + dx * d);
++    }
++    return out;
++  }
++
++  const D = { blob, leafy, castRect, castCircle, castRot, aoInside, aoOutside, box, SUN, SPM };
+   let pats = null;
+   D.pattern = function (ctx, name) {
+     // los patrones se crean por contexto (cada chunk tiene el suyo): caché por contexto
+@@ -38,8 +148,8 @@
+ 
+   // ---------- carreteras ----------
+   // Añade al trazado los tramos de la carretera que tocan el rectángulo
+-  function roadPath(ctx, r, x0, y0, x1, y1) {
+-    const p = r.pts, pad = r.w / 2 + (r.side || 0) + 8;
++  function roadPath(ctx, r, x0, y0, x1, y1, pts) {
++    const p = pts || r.pts, pad = r.w / 2 + (r.side || 0) + 8;
+     let open = false, any = false;
+     for (let i = 0; i < p.length - 2; i += 2) {
+       const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
+@@ -55,38 +165,144 @@
+   D.roads = function (ctx, roads, x0, y0, x1, y1, rng) {
+     if (!roads.length) return;
+     ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+-    const stroke = (r, w, style, dash) => {
++    const stroke = (r, w, style, dash, pts) => {
+       ctx.beginPath();
+-      if (!roadPath(ctx, r, x0, y0, x1, y1)) return;
++      if (!roadPath(ctx, r, x0, y0, x1, y1, pts)) return;
+       ctx.lineWidth = w; ctx.strokeStyle = style;
+       if (dash) ctx.setLineDash(dash);
+       ctx.stroke();
+       if (dash) ctx.setLineDash([]);
+     };
+-    // aceras y bordillos
+-    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2, D.pattern(ctx, 'concrete'));
+-    for (const r of roads) if (r.side > 0) stroke(r, r.w + 8, 'rgba(20,20,18,0.55)');
++    const paved = (r) => r.kind !== 'dirt' && r.kind !== 'lane';
++    const lq = LOWQ();
++    // aceras de baldosa con bordillo
++    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2 + 6, 'rgba(0,0,0,0.25)');
++    for (const r of roads) if (r.side > 0) stroke(r, r.w + r.side * 2, D.pattern(ctx, 'pavers'));
++    // suciedad pegada a las fachadas (borde exterior de la acera)
++    if (!lq) for (const r of roads) if (r.side > 0) { stroke(r, r.w + r.side * 2, 'rgba(30,26,20,0.16)'); stroke(r, r.w + r.side * 2 - 18, D.pattern(ctx, 'pavers')); }
++    for (const r of roads) if (r.side > 0) stroke(r, r.w + 14, 'rgba(150,146,136,0.9)');   // bordillo (cara superior)
++    for (const r of roads) if (r.side > 0) stroke(r, r.w + 6, 'rgba(24,24,22,0.9)');       // canto en sombra
+     // arcén de tierra en carreteras rurales
+-    for (const r of roads) if (!r.side && r.kind !== 'dirt' && r.kind !== 'lane') stroke(r, r.w + 26, 'rgba(60,52,40,0.35)');
++    for (const r of roads) if (!r.side && paved(r)) { stroke(r, r.w + 34, 'rgba(58,50,38,0.22)'); stroke(r, r.w + 18, 'rgba(70,62,48,0.4)'); }
++    for (const r of roads) if (!paved(r)) stroke(r, r.w + 14, 'rgba(50,40,28,0.25)');
+     // calzada
+-    for (const r of roads) stroke(r, r.w, D.pattern(ctx, r.kind === 'dirt' ? 'dirtroad' : 'asphalt'));
++    for (const r of roads) stroke(r, r.w, D.pattern(ctx, paved(r) ? 'asphalt' : 'dirtroad'));
++    // mugre en los bordes de la calzada y desgaste por el centro
++    for (const r of roads) if (paved(r)) {
++      stroke(r, r.w, 'rgba(14,12,10,0.22)');
++      stroke(r, r.w - 16, D.pattern(ctx, 'asphalt'));
++      if (!lq) stroke(r, r.w - 40, 'rgba(120,116,108,0.05)');
++    }
++    // rodadas de neumáticos (bandas oscuras)
++    if (!lq) for (const r of roads) {
++      if (!paved(r)) continue;
++      const lanes = r.w > 200 ? [-0.25, 0.25] : [0];
++      for (const ln of lanes) for (const k of [-1, 1]) {
++        const off = r.w * ln + k * 26;
++        if (Math.abs(off) > r.w / 2 - 14) continue;
++        stroke(r, 12, 'rgba(10,10,12,0.10)', null, offsetPts(r.pts, off));
++      }
++    }
+     // marcas viales gastadas
+     for (const r of roads) {
+       if (r.kind === 'highway') {
+-        stroke(r, r.w - 18, 'rgba(200,196,180,0.22)');
+-        stroke(r, r.w - 24, D.pattern(ctx, 'asphalt'));
++        stroke(r, 3, 'rgba(205,200,186,0.3)', null, offsetPts(r.pts, r.w / 2 - 14));
++        stroke(r, 3, 'rgba(205,200,186,0.3)', null, offsetPts(r.pts, -r.w / 2 + 14));
+         stroke(r, 4, 'rgba(190,160,70,0.45)', [56, 44]);
+       } else if (r.kind === 'road' || r.kind === 'avenue') {
+-        stroke(r, 4, 'rgba(210,205,190,0.3)', [44, 52]);
+-      } else if (r.kind === 'dirt') {
+-        // rodadas
+-        stroke(r, r.w * 0.55, 'rgba(40,30,20,0.18)');
+-        stroke(r, r.w * 0.3, D.pattern(ctx, 'dirtroad'));
++        stroke(r, 4, 'rgba(210,205,190,0.32)', [44, 52]);
++      } else if (r.kind === 'street' && r.w >= 180) {
++        stroke(r, 3, 'rgba(210,205,190,0.18)', [30, 60]);
++      } else if (!paved(r)) {
++        // rodadas y franja central con hierba
++        for (const k of [-1, 1]) stroke(r, r.w * 0.16, 'rgba(36,26,16,0.28)', null, offsetPts(r.pts, k * r.w * 0.22));
++        stroke(r, r.w * 0.12, 'rgba(70,74,44,0.35)');
+       }
+     }
++    // borrones de pintura (la pintura vieja se cae a trozos)
+     ctx.lineCap = 'butt';
+-    // grietas y baches
+-    void rng;
++    D.roadWear(ctx, roads, x0, y0, x1, y1, rng);
++  };
++
++  // Grietas, baches, parches, manchas de aceite, hojas y hierbas a lo largo de las calles
++  D.roadWear = function (ctx, roads, x0, y0, x1, y1, rng) {
++    if (!rng) return;
++    const lq = LOWQ();
++    for (const r of roads) {
++      const p = r.pts;
++      const paved = r.kind !== 'dirt' && r.kind !== 'lane';
++      for (let i = 0; i < p.length - 2; i += 2) {
++        const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
++        const L = Math.hypot(bx - ax, by - ay);
++        if (L < 1) continue;
++        const pad = r.w / 2 + 20;
++        if (Math.max(ax, bx) < x0 - pad || Math.min(ax, bx) > x1 + pad || Math.max(ay, by) < y0 - pad || Math.min(ay, by) > y1 + pad) continue;
++        const ux = (bx - ax) / L, uy = (by - ay) / L, nx = -uy, ny = ux;
++        // número de detalles proporcional al tramo que cae en el chunk
++        const n = Math.round(L / (lq ? 260 : 120));
++        for (let k = 0; k < n; k++) {
++          const t = rng.next() * L, side = rng.range(-1, 1);
++          const kind = rng.next();
++          const off = side * (r.w / 2 - 10);
++          const x = ax + ux * t + nx * off, y = ay + uy * t + ny * off;
++          if (x < x0 + 14 || x > x1 - 14 || y < y0 + 14 || y > y1 - 14) continue;
++          if (paved) {
++            if (kind < 0.3) {
++              // grieta longitudinal o en piel de cocodrilo
++              ctx.strokeStyle = 'rgba(8,8,10,0.55)'; ctx.lineWidth = 1.2;
++              ctx.beginPath(); let cx = x, cy = y; ctx.moveTo(cx, cy);
++              let a = Math.atan2(uy, ux) + rng.range(-0.6, 0.6);
++              for (let s = 0; s < 6; s++) { a += rng.range(-0.8, 0.8); cx += Math.cos(a) * rng.range(5, 12); cy += Math.sin(a) * rng.range(5, 12); ctx.lineTo(cx, cy); if (rng.chance(0.3)) { ctx.moveTo(cx, cy); ctx.lineTo(cx + rng.range(-8, 8), cy + rng.range(-8, 8)); ctx.moveTo(cx, cy); } }
++              ctx.stroke();
++            } else if (kind < 0.42) {
++              // bache: hueco oscuro con borde claro y agua al fondo
++              const rr = rng.range(6, 14), r2 = new U.RNG(rng.int(1, 1e9));
++              ctx.fillStyle = 'rgba(120,116,106,0.25)'; blob(ctx, x - 1, y - 1, rr + 2, r2, 9, 0.3); ctx.fill();
++              ctx.fillStyle = '#1a1a1b'; blob(ctx, x, y, rr, r2, 9, 0.3); ctx.fill();
++              ctx.fillStyle = 'rgba(60,70,78,0.45)'; blob(ctx, x + 1, y + 1, rr * 0.55, r2, 7, 0.3); ctx.fill();
++            } else if (kind < 0.55) {
++              // parche de asfalto
++              ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(uy, ux));
++              const w = rng.range(30, 80), h = rng.range(18, 40);
++              ctx.fillStyle = 'rgba(18,18,20,0.4)'; ctx.fillRect(-w / 2, -h / 2, w, h);
++              ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(-w / 2, -h / 2, w, h);
++              ctx.restore();
++            } else if (kind < 0.68) {
++              // mancha de aceite
++              const rr = rng.range(8, 20);
++              const g = ctx.createRadialGradient(x, y, 0, x, y, rr);
++              g.addColorStop(0, 'rgba(8,6,10,0.45)'); g.addColorStop(0.7, 'rgba(8,6,10,0.25)'); g.addColorStop(1, 'rgba(8,6,10,0)');
++              ctx.fillStyle = g; ctx.fillRect(x - rr, y - rr, rr * 2, rr * 2);
++            } else if (kind < 0.8 && !lq) {
++              // hojas y basura arrastradas al bordillo
++              const ex = ax + ux * t + nx * Math.sign(side || 1) * (r.w / 2 - 6), ey = ay + uy * t + ny * Math.sign(side || 1) * (r.w / 2 - 6);
++              for (let q = 0; q < 8; q++) {
++                ctx.fillStyle = rng.pick(['#4a3a24', '#5e4a2c', '#3c2e1e', '#6a5a3a', '#55504a']);
++                ctx.save(); ctx.translate(ex + ux * rng.range(-20, 20) + nx * rng.range(-5, 5), ey + uy * rng.range(-20, 20) + ny * rng.range(-5, 5)); ctx.rotate(rng.range(0, 6.28));
++                ctx.fillRect(-2, -1.2, 4, 2.4); ctx.restore();
++              }
++            } else if (kind < 0.92) {
++              // hierbas en las juntas del bordillo / grietas
++              const ex = ax + ux * t + nx * Math.sign(side || 1) * (r.w / 2 - 3), ey = ay + uy * t + ny * Math.sign(side || 1) * (r.w / 2 - 3);
++              ctx.lineWidth = 1;
++              for (let q = 0; q < 6; q++) {
++                ctx.strokeStyle = rng.pick(['rgba(84,92,52,0.9)', 'rgba(104,104,62,0.85)', 'rgba(66,74,42,0.9)']);
++                const bx2 = ex + ux * rng.range(-10, 10), by2 = ey + uy * rng.range(-10, 10);
++                ctx.beginPath();
++                for (let b = 0; b < 4; b++) { const a = rng.range(0, TAU), l = rng.range(3, 8); ctx.moveTo(bx2, by2); ctx.lineTo(bx2 + Math.cos(a) * l, by2 + Math.sin(a) * l); }
++                ctx.stroke();
++              }
++            }
++          } else if (kind < 0.35) {
++            // charco en la rodada
++            const rr = rng.range(8, 18), r2 = new U.RNG(rng.int(1, 1e9));
++            ctx.fillStyle = 'rgba(30,26,20,0.5)'; blob(ctx, x, y, rr + 3, r2, 9, 0.3); ctx.fill();
++            ctx.fillStyle = 'rgba(52,60,64,0.75)'; blob(ctx, x, y, rr, r2, 9, 0.3); ctx.fill();
++            ctx.fillStyle = 'rgba(160,170,175,0.12)'; ctx.beginPath(); ctx.ellipse(x - rr * 0.3, y - rr * 0.3, rr * 0.4, rr * 0.15, -0.5, 0, TAU); ctx.fill();
++          }
++        }
++      }
++    }
+   };
+ 
+   // ---------- zonas de suelo ----------
+@@ -487,8 +703,39 @@
+   };
+ 
+   // ---------- árboles y rocas ----------
++  const TREEPAL = [
++    ['#232a1d', '#364026', '#4f5a38'],   // verde apagado
++    ['#29271b', '#454027', '#625b37'],   // oliva seco
++    ['#2b2318', '#523f25', '#735a33'],   // otoño marchito
++    ['#1f2a22', '#30402f', '#475a42'],   // verde azulado
++  ];
++  function treeKind(o) {
++    if (o.burned) return 'bare';
++    const v = (o.seed >>> 0) % 10;
++    if (v < 6) return 'leafy';
++    if (v === 6) return 'conifer';
++    if (v === 7) return 'stump';
++    return 'bare';
++  }
++  D.treeKind = treeKind;
++  function clumpPath(ctx, list, k, off, rng) {
++    ctx.beginPath();
++    for (const c of list) {
++      const x = c[0] - SUN.x * c[2] * off, y = c[1] - SUN.y * c[2] * off, r = c[2] * k;
++      const n = 11;
++      for (let i = 0; i <= n; i++) {
++        const a = (i / n) * TAU + c[3];
++        const rr = r * (0.88 + rng.next() * 0.16);
++        const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
++        if (i === 0) ctx.moveTo(px, py);
++        else { const am = a - TAU / n / 2, rm = r * (1.03 + rng.next() * 0.1); ctx.quadraticCurveTo(x + Math.cos(am) * rm, y + Math.sin(am) * rm, px, py); }
++      }
++      ctx.closePath();
++    }
++  }
+   D.tree = function (ctx, o, rng) {
+     const cx = o.x, cy = o.y, r = o.r, crown = o.crown;
++    const kind = treeKind(o);
+     const wood = o.burned ? rng.pick(['#1e1a16', '#24201c']) : rng.pick(['#4a4036', '#52473b', '#443a31', '#5a4e42']);
+     ctx.lineCap = 'round';
+     ctx.strokeStyle = wood;
+@@ -502,83 +749,182 @@
+       const n = rng.chance(0.4) ? 3 : 2;
+       for (let k = 0; k < n; k++) branch(ex, ey, a + rng.range(-0.75, 0.75), len * rng.range(0.5, 0.72), Math.max(1, w * 0.6), depth - 1);
+     };
+-    const variant = o.seed % 6;
+-    if (variant === 3 && !o.burned) {
+-      // conífera muerta
+-      for (let layer = 0; layer < 3; layer++) {
+-        const R = crown * (0.85 - layer * 0.25), n = 10 + layer * 2;
+-        ctx.fillStyle = ['#2b3027', '#363a2e', '#424532'][layer];
++    if (kind === 'leafy') {
++      const pal = o.swamp ? TREEPAL[3] : TREEPAL[(o.seed >>> 3) % 4];
++      const R = crown * 0.8;
++      const list = [[cx, cy, R * 0.62, rng.range(0, TAU)]];
++      const n = LOWQ() ? 4 : 6 + Math.min(5, Math.floor(R / 22));
++      for (let i = 0; i < n; i++) {
++        const a = (i / n) * TAU + rng.range(-0.4, 0.4), d = R * rng.range(0.32, 0.55);
++        list.push([cx + Math.cos(a) * d, cy + Math.sin(a) * d, R * rng.range(0.34, 0.5), rng.range(0, TAU)]);
++      }
++      // ramas que asoman por debajo del borde
++      for (let i = 0; i < 3; i++) { const a = rng.range(0, TAU); branch(cx, cy, a, R * rng.range(0.85, 1.02), r * 0.35, 0); }
++      ctx.fillStyle = pal[0]; clumpPath(ctx, list, 1, 0, rng); ctx.fill();
++      ctx.fillStyle = pal[1]; clumpPath(ctx, list, 0.8, 0.14, rng); ctx.fill();
++      ctx.globalAlpha = 0.8;
++      ctx.fillStyle = pal[2]; clumpPath(ctx, list, 0.45, 0.32, rng); ctx.fill();
++      ctx.globalAlpha = 1;
++      if (!LOWQ()) {
++        // hojas sueltas: puntitos claros y huecos oscuros
++        for (let i = 0; i < 46; i++) {
++          const a = rng.range(0, TAU), d = Math.sqrt(rng.next()) * R * 0.95;
++          const dark = rng.chance(0.55);
++          ctx.fillStyle = dark ? 'rgba(10,12,8,0.32)' : 'rgba(170,170,120,0.16)';
++          ctx.beginPath(); ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(1.5, 3.5), 0, TAU); ctx.fill();
++        }
++      }
++      ctx.lineCap = 'butt';
++      return;
++    }
++    if (kind === 'conifer') {
++      const R = crown * 0.78;
++      const cols = ['#1e251d', '#2b3528', '#3c4734', '#52603f'];
++      for (let layer = 0; layer < 4; layer++) {
++        const RR = R * (1 - layer * 0.22), nn = 9 + layer * 2;
++        const ox = -SUN.x * R * 0.06 * layer, oy = -SUN.y * R * 0.06 * layer;
++        ctx.fillStyle = cols[layer];
+         ctx.beginPath();
+-        for (let i = 0; i < n * 2; i++) {
+-          const a = (i / (n * 2)) * TAU + layer * 0.3;
+-          const rr = (i % 2 ? R * 0.55 : R) * rng.range(0.85, 1.1);
+-          const px = cx + Math.cos(a) * rr, py = cy + Math.sin(a) * rr;
++        for (let i = 0; i < nn * 2; i++) {
++          const a = (i / (nn * 2)) * TAU + layer * 0.3;
++          const rr = (i % 2 ? RR * 0.6 : RR) * rng.range(0.86, 1.08);
++          const px = cx + ox + Math.cos(a) * rr, py = cy + oy + Math.sin(a) * rr;
+           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+         }
+         ctx.closePath(); ctx.fill();
+       }
++      ctx.fillStyle = 'rgba(120,130,90,0.35)'; ctx.beginPath(); ctx.arc(cx - SUN.x * R * 0.25, cy - SUN.y * R * 0.25, R * 0.1, 0, TAU); ctx.fill();
+       ctx.lineCap = 'butt';
+       return;
+     }
+-    if (variant === 4) {
++    if (kind === 'stump') {
+       // tocón con el tronco caído
+       const fa = rng.range(0, TAU), FL = crown * 1.0;
+       ctx.lineWidth = r * 1.1;
++      ctx.strokeStyle = sh(wood, 0.7);
+       ctx.beginPath(); ctx.moveTo(cx + Math.cos(fa) * r, cy + Math.sin(fa) * r); ctx.lineTo(cx + Math.cos(fa) * FL, cy + Math.sin(fa) * FL); ctx.stroke();
++      ctx.lineWidth = r * 0.5; ctx.strokeStyle = sh(wood, 1.05);
++      ctx.beginPath(); ctx.moveTo(cx + Math.cos(fa) * r - SUN.x * r * 0.25, cy + Math.sin(fa) * r - SUN.y * r * 0.25); ctx.lineTo(cx + Math.cos(fa) * FL - SUN.x * r * 0.25, cy + Math.sin(fa) * FL - SUN.y * r * 0.25); ctx.stroke();
++      ctx.strokeStyle = wood;
+       branch(cx + Math.cos(fa) * FL, cy + Math.sin(fa) * FL, fa + 0.4, crown * 0.3, r * 0.4, 1);
+-      ctx.fillStyle = U.shade(o.burned ? '#2a2420' : wood, 1.15);
+-      ctx.beginPath(); ctx.arc(cx, cy, r * 0.9, 0, TAU); ctx.fill();
++      ctx.fillStyle = sh(o.burned ? '#2a2420' : wood, 0.8);
++      ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, TAU); ctx.fill();
++      ctx.fillStyle = '#7a6a50'; ctx.beginPath(); ctx.arc(cx, cy, r * 0.75, 0, TAU); ctx.fill();
++      ctx.strokeStyle = 'rgba(60,44,28,0.6)'; ctx.lineWidth = 1;
++      ctx.beginPath(); ctx.arc(cx, cy, r * 0.5, 0, TAU); ctx.moveTo(cx + r * 0.25, cy); ctx.arc(cx, cy, r * 0.25, 0, TAU); ctx.stroke();
+       ctx.lineCap = 'butt';
+       return;
+     }
+-    const limbs = Math.max(4, (o.branches || 6) - (variant === 2 ? 0 : 1));
++    // árbol muerto, sin hojas
++    const limbs = Math.max(4, (o.branches || 6) - 1);
+     const base = rng.range(0, TAU);
++    ctx.strokeStyle = sh(wood, 0.75);
+     for (let i = 0; i < limbs; i++) {
+       const a = base + (i / limbs) * TAU + rng.range(-0.5, 0.5);
+-      branch(cx, cy, a, crown * rng.range(0.32, 0.46), r * 0.55, variant === 2 ? 3 : 2);
++      branch(cx, cy, a, crown * rng.range(0.32, 0.46), r * 0.55, 2);
+     }
+-    if ((variant === 1 || variant === 5) && !o.burned) {
+-      for (let i = 0; i < 8; i++) {
+-        const a = rng.range(0, TAU), d = rng.range(crown * 0.3, crown * 0.8);
+-        ctx.fillStyle = rng.pick(['rgba(58,60,40,0.55)', 'rgba(70,62,40,0.5)', 'rgba(48,50,36,0.6)', 'rgba(64,56,36,0.5)']);
+-        blob(ctx, cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(8, 18), rng, 7, 0.35); ctx.fill();
++    if (!o.burned && rng.chance(0.5)) {
++      for (let i = 0; i < 6; i++) {
++        const a = rng.range(0, TAU), d = rng.range(crown * 0.3, crown * 0.7);
++        ctx.fillStyle = rng.pick(['rgba(58,60,40,0.6)', 'rgba(70,62,40,0.55)', 'rgba(48,50,36,0.65)']);
++        blob(ctx, cx + Math.cos(a) * d, cy + Math.sin(a) * d, rng.range(8, 16), rng, 8, 0.35); ctx.fill();
+       }
+     }
+-    ctx.fillStyle = U.shade(o.burned ? '#2a2420' : wood, 0.85);
++    ctx.fillStyle = sh(o.burned ? '#2a2420' : wood, 0.85);
+     ctx.beginPath(); ctx.arc(cx, cy, r * 0.85, 0, TAU); ctx.fill();
+-    ctx.fillStyle = 'rgba(255,235,200,0.07)';
++    ctx.fillStyle = 'rgba(255,235,200,0.08)';
+     ctx.beginPath(); ctx.arc(cx - r * 0.25, cy - r * 0.25, r * 0.4, 0, TAU); ctx.fill();
+     ctx.lineCap = 'butt';
+   };
+   D.rock = function (ctx, o, rng) {
+-    const base = o.desert ? rng.pick(['#6e5e48', '#7a6850', '#62564a']) : rng.pick(['#4e4a44', '#57524a', '#45423e', '#5c5448']);
++    const base = o.desert ? rng.pick(['#6e5e48', '#7a6850', '#62564a']) : rng.pick(['#4e4a44', '#57524a', '#4a4743', '#5c5448']);
++    const R = o.r;
++    const r2 = new U.RNG(rng.int(1, 1e9));
++    // piedras sueltas alrededor
++    for (let i = 0; i < 3; i++) {
++      const a = rng.range(0, TAU), d = R * rng.range(1.1, 1.5), rr = rng.range(2, Math.max(3, R * 0.15));
++      ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(o.x + Math.cos(a) * d + 1.5, o.y + Math.sin(a) * d + 2, rr, 0, TAU); ctx.fill();
++      ctx.fillStyle = sh(base, rng.range(0.85, 1.15)); ctx.beginPath(); ctx.arc(o.x + Math.cos(a) * d, o.y + Math.sin(a) * d, rr, 0, TAU); ctx.fill();
++    }
++    // base en sombra, cara iluminada desplazada hacia el sol, facetas
++    ctx.fillStyle = sh(base, 0.62);
++    blob(ctx, o.x, o.y, R, r2, 10, 0.16); ctx.fill();
+     ctx.fillStyle = base;
+-    blob(ctx, o.x, o.y, o.r, rng, 9, 0.18); ctx.fill();
+-    ctx.fillStyle = 'rgba(255,245,225,0.09)';
+-    blob(ctx, o.x - o.r * 0.25, o.y - o.r * 0.3, o.r * 0.55, rng, 7, 0.25); ctx.fill();
+-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+-    blob(ctx, o.x + o.r * 0.3, o.y + o.r * 0.3, o.r * 0.5, rng, 7, 0.25); ctx.fill();
+-    if (o.r > 30) { ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(o.x - o.r * 0.5, o.y); ctx.lineTo(o.x + o.r * 0.2, o.y + o.r * 0.3); ctx.stroke(); }
++    blob(ctx, o.x - SUN.x * R * 0.1, o.y - SUN.y * R * 0.1, R * 0.86, r2, 9, 0.18); ctx.fill();
++    ctx.fillStyle = sh(base, 1.22);
++    ctx.beginPath();
++    const a0 = -2.2 + rng.range(-0.3, 0.3);
++    ctx.moveTo(o.x - SUN.x * R * 0.15, o.y - SUN.y * R * 0.15);
++    for (let i = 0; i <= 3; i++) { const a = a0 + i * 0.5 + rng.range(-0.1, 0.1); ctx.lineTo(o.x + Math.cos(a) * R * rng.range(0.6, 0.8), o.y + Math.sin(a) * R * rng.range(0.6, 0.8)); }
++    ctx.closePath(); ctx.fill();
++    ctx.fillStyle = 'rgba(255,248,230,0.08)';
++    blob(ctx, o.x - R * 0.3, o.y - R * 0.35, R * 0.35, r2, 7, 0.25); ctx.fill();
++    // grietas
++    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.2;
++    ctx.beginPath();
++    for (let i = 0; i < (R > 26 ? 3 : 1); i++) {
++      let x = o.x + rng.range(-R * 0.5, R * 0.5), y = o.y + rng.range(-R * 0.5, R * 0.5);
++      ctx.moveTo(x, y); for (let k = 0; k < 3; k++) { x += rng.range(-R * 0.3, R * 0.3); y += rng.range(-R * 0.3, R * 0.3); ctx.lineTo(x, y); }
++    }
++    ctx.stroke();
++    // musgo / liquen
++    if (!o.desert) {
++      for (let i = 0; i < 4; i++) { ctx.fillStyle = rng.pick(['rgba(70,84,44,0.45)', 'rgba(100,104,70,0.35)', 'rgba(150,150,120,0.18)']); blob(ctx, o.x + rng.range(-R * 0.5, R * 0.4), o.y + rng.range(-R * 0.5, R * 0.4), R * rng.range(0.12, 0.25), r2, 7, 0.4); ctx.fill(); }
++    }
++  };
++
++  // Altura aproximada (m) de los accesorios para sombras (proyectadas y de la linterna)
++  const PROP_H = {
++    rock: 0.8, silo: 12, watertower: 10, fueltank: 4, barrel: 1, haybale: 1.4, well: 0.8, container: 2.6, tent: 2,
++    watchtower: 6, bleacher: 2, dumpster: 1.4, kiosk: 3, log: 0.5, crate: 0.8, milcrate: 0.6, sandbag: 0.8, bench: 0.5,
++    grave: 0.9, pump: 1.7, statue: 3, fountain: 0.8, barrier: 1, barricade: 1.2, trough: 0.7, woodpile: 1, firepit: 0.2,
++    fuselage: 4, smallplane: 2, helicopter: 3, wing: 1.5, scarecrow: 1.8, target: 1.5,
+   };
++  D.PROP_H = PROP_H;
++  const VEH = { car: 1.5, police: 1.5, ambulance: 2.6, military: 3, humvee: 1.9, truck: 3.2, bus: 3.2, van: 2.2, pickup: 1.8, tractor: 2.4, boat: 1 };
+ 
+   // Sombra de un accesorio (antes de dibujarlo)
+   D.propShadow = function (ctx, p) {
+-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+     switch (p.kind) {
+       case 'tree': {
+-        const sx = p.x + 18, sy = p.y + 22, R = p.crown * 1.0;
+-        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, R);
+-        g.addColorStop(0, 'rgba(0,0,0,0.24)'); g.addColorStop(1, 'rgba(0,0,0,0)');
++        const kind = treeKind(p);
++        const R = p.crown * (kind === 'bare' || kind === 'stump' ? 0.8 : 0.85);
++        if (kind === 'stump') { castCircle(ctx, p.x, p.y, p.r, 4, 0.3); return; }
++        const off = p.crown * 0.55;
++        const sx = p.x + SUN.x * off, sy = p.y + SUN.y * off;
++        const a = kind === 'bare' ? 0.14 : 0.36;
++        const g = ctx.createRadialGradient(sx, sy, R * 0.2, sx, sy, R);
++        g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(0.65, `rgba(0,0,0,${a * 0.7})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+         ctx.fillStyle = g; ctx.fillRect(sx - R, sy - R, R * 2, R * 2);
++        castCircle(ctx, p.x, p.y, p.r * 0.8, off * 0.9, 0.22);
++        return;
++      }
++      case 'rock': {
++        const h = p.r > 26 ? 1.3 : 0.6;
++        castCircle(ctx, p.x, p.y, p.r * 0.92, h * SPM * 1.6, 0.4);
++        ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(p.x + 1, p.y + 1.5, p.r * 1.02, 0, TAU); ctx.fill();
+         return;
+       }
+-      case 'rock': case 'silo': case 'watertower': case 'fueltank': case 'barrel': case 'haybale': case 'well':
+-        ctx.beginPath(); ctx.ellipse(p.x + p.r * 0.25 + 3, p.y + p.r * 0.3 + 4, p.r, p.r * 0.85, 0, 0, TAU); ctx.fill();
++      case 'silo': case 'watertower': case 'fueltank': case 'barrel': case 'haybale': case 'well': case 'fountain': case 'statue':
++        castCircle(ctx, p.x, p.y, p.r, Math.min(60, PROP_H[p.kind] * SPM), 0.36);
++        return;
++      case 'container': case 'tent': case 'watchtower': case 'bleacher': case 'dumpster': case 'kiosk': case 'log': case 'crate':
++      case 'milcrate': case 'sandbag': case 'bench': case 'grave': case 'pump': case 'barricade': case 'woodpile':
++        castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, Math.min(60, PROP_H[p.kind] * SPM), 0.36);
+         return;
+-      case 'container': case 'tent': case 'watchtower': case 'bleacher': case 'dumpster': case 'kiosk':
+-        ctx.fillRect(p.x - p.w / 2 + 10, p.y - p.h / 2 + 14, p.w, p.h);
++      case 'barrier':
++        if (p.rotated) castRot(ctx, p.x, p.y, p.ang || 0, p.w, p.h, SPM, 0.34);
++        else castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, SPM, 0.34);
++        return;
++      case 'fence': {
++        const hm = p.style === 'concrete' ? 2.2 : p.style === 'stone' ? 1 : p.style === 'chain' ? 0 : 1.2;
++        if (!hm) return;
++        castRect(ctx, p.x - p.w / 2, p.y - p.h / 2, p.w, p.h, hm * SPM, p.style === 'concrete' || p.style === 'stone' ? 0.38 : 0.22);
+         return;
++      }
++      case 'fuselage': castRot(ctx, p.x, p.y, p.ang, p.L, p.rad * 2, 20, 0.36); return;
+     }
++    if (VEH[p.kind] && p.L) castRot(ctx, p.x, p.y, p.ang, p.L * 0.96, p.W * 0.94, VEH[p.kind] * SPM, 0.42);
+   };
+ 
+   // ---------- accesorios ----------
+diff --git a/js/world/world.js b/js/world/world.js
+index 0feb36f..962b8cf 100644
+--- a/js/world/world.js
++++ b/js/world/world.js
+@@ -218,9 +218,22 @@
+         }
+         for (const c of det.chests) if (c.x >= x0 && c.x < x1 && c.y >= y0 && c.y < y1) ch.chests.push(c);
+         for (const h of det.hints) if (h.x >= x0 && h.x < x1 && h.y >= y0 && h.y < y1) ch.hints.push(h);
+-        if (b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0) ch.excl.push(b);
++        // la naturaleza (árboles, rocas, troncos) deja 1,25 m libres alrededor de los edificios
++        const mg = 40;
++        if (b.x - mg < x1 && b.x + b.w + mg > x0 && b.y - mg < y1 && b.y + b.h + mg > y0) ch.excl.push({ x: b.x - mg, y: b.y - mg, w: b.w + mg * 2, h: b.h + mg * 2, b });
+       }
+       yield 'pop-collect';
++      // pasos (pasarelas y vados) sobre ríos y barrancos
++      ch._mw = this.terrain.mayHaveWater(x0 - 24, y0 - 24, x1 + 24, y1 + 24);
++      if (ch._mw) {
++        const C = WG.PARAMS.CROSS, pad = WG.PARAMS.CROSS_MAX + 8 * M;
++        for (let j = Math.floor((y0 - pad) / C); j <= Math.floor((y1 + pad) / C); j++) {
++          for (let i = Math.floor((x0 - pad) / C); i <= Math.floor((x1 + pad) / C); i++) {
++            if (!this.macro.cross.has(i + ',' + j)) { this.macro.crossCell(i, j); yield 'pop-cross'; }
++          }
++        }
++        for (const r of this.macro.crossingsIn(x0, y0, x1, y1, [])) if (!ch.roads.includes(r)) ch.roads.push(r);
++      }
+       // agua y barrancos
+       yield* this.terrainGen(ch);
+       // naturaleza
+@@ -248,7 +261,7 @@
+     * terrainGen(ch) {
+       const T = this.terrain;
+       const x0 = ch.x0, y0 = ch.y0;
+-      if (!T.mayHaveWater(x0 - 24, y0 - 24, x0 + CH + 24, y0 + CH + 24)) { ch.water = null; return; }
++      if (ch._mw === false || (ch._mw === undefined && !T.mayHaveWater(x0 - 24, y0 - 24, x0 + CH + 24, y0 + CH + 24))) { ch.water = null; return; }
+       const N = 64, S = CH / N;
+       const mask = new Uint8Array(N * N);
+       const roads = ch.roads.filter((r) => !r.collapsed);
